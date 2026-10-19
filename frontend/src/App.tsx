@@ -1,10 +1,14 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
+
+const G1Viewer = lazy(() =>
+  import("./G1Viewer").then((module) => ({ default: module.G1Viewer })),
+);
 
 interface TelemetrySnapshot {
   schema_version: string;
-  mode: "mock" | "real" | "unknown";
+  mode: "real";
   connection: {
-    state: "mock" | "connected" | "delayed" | "disconnected" | "error" | "unknown";
+    state: "connected" | "delayed" | "disconnected" | "error" | "unknown";
     interface: string | null;
     last_data_at: string | null;
     error: string | null;
@@ -69,7 +73,6 @@ function connectionLabel(
   lowStateState: TelemetrySnapshot["sources"][string]["state"],
 ): string {
   if (!snapshot) return "等待状态数据";
-  if (snapshot.connection.state === "mock") return "Mock 数据源";
   if (
     snapshot.connection.state === "connected" &&
     lowStateState === "offline"
@@ -138,10 +141,11 @@ export function App() {
           const next = JSON.parse(event.data) as TelemetrySnapshot;
           if (
             next.schema_version !== "1.0" ||
+            next.mode !== "real" ||
             !next.connection ||
             !next.sources?.low_state
           ) {
-            throw new Error("遥测数据格式版本或必需字段不受支持。");
+            throw new Error("遥测 schema、运行模式或必需字段不受支持。");
           }
           setSnapshot(next);
           setSampleReceivedAt(performance.now());
@@ -177,11 +181,18 @@ export function App() {
   const elapsedSinceSnapshot =
     sampleReceivedAt === null ? 0 : Math.max(0, ageTick - sampleReceivedAt);
   const lowStateSource = snapshot?.sources.low_state;
+  const hipImuSource = snapshot?.sources.hip_imu;
   const sourceAge = lowStateSource
     ? liveSourceAge(lowStateSource, elapsedSinceSnapshot) ?? undefined
     : undefined;
   const lowStateState = lowStateSource
     ? liveSourceState(lowStateSource, elapsedSinceSnapshot)
+    : "unknown";
+  const hipImuAge = hipImuSource
+    ? liveSourceAge(hipImuSource, elapsedSinceSnapshot)
+    : null;
+  const hipImuState = hipImuSource
+    ? liveSourceState(hipImuSource, elapsedSinceSnapshot)
     : "unknown";
 
   return (
@@ -192,9 +203,7 @@ export function App() {
           <h1>机器人状态工作台</h1>
         </div>
         <span className="mode-badge" role="status">
-          {snapshot?.mode === "real"
-            ? "REAL · 只读遥测"
-            : "MOCK · 不连接真实机器人"}
+          {snapshot ? "REAL · 只读遥测" : "REAL · 等待连接"}
         </span>
       </header>
 
@@ -203,9 +212,7 @@ export function App() {
           i
         </span>
         <p>
-          {snapshot?.mode === "real"
-            ? "当前为真实只读遥测模式。此版本不提供任何真机控制能力。"
-            : "当前为开发 Mock 模式。这里显示的连接状态不是 Unitree DDS 实机连接；所有真机控制能力均已禁用。"}
+          可运行模式仅接受真实 Unitree SDK2/DDS 遥测；无法取得真实数据时不会生成替代状态。此版本不提供任何真机控制能力。
         </p>
       </section>
 
@@ -213,17 +220,17 @@ export function App() {
         <article className="status-card">
           <span className="card-label">运行模式</span>
           <strong>
-            {snapshot?.mode === "real" ? "真实遥测（只读）" : "Mock 模拟数据"}
+            真实遥测（只读）
           </strong>
           <span className="subtle">
-            {snapshot?.mode === "real" ? "控制接口未开放" : "真实 SDK 未初始化"}
+            SDK2/DDS 必须成功初始化
           </span>
         </article>
         <article className="status-card">
           <span className="card-label">DDS 连接</span>
           <strong>{connectionLabel(snapshot, lowStateState)}</strong>
           <span className="subtle">
-            网卡：{snapshot?.connection.interface ?? "未配置（Mock）"}
+            网卡：{snapshot?.connection.interface ?? "等待启动配置"}
           </span>
         </article>
         <article className="status-card">
@@ -256,17 +263,13 @@ export function App() {
           <div>
             <dt>数据来源</dt>
             <dd>
-              {snapshot?.mode === "real"
-                ? `Unitree SDK2 / DDS（${snapshot.connection.interface ?? "网卡未知"}）`
-                : "本地 Fake SDK 状态服务"}
+              {`Unitree SDK2 / DDS（${snapshot?.connection.interface ?? "网卡未知"}）`}
             </dd>
           </div>
           <div>
             <dt>DDS / Unitree SDK</dt>
             <dd>
-              {snapshot?.mode === "real"
-                ? snapshot.connection.message
-                : "Mock 模式未连接真实机器人"}
+              {snapshot?.connection.message ?? "等待真实 SDK2/DDS 连接"}
             </dd>
           </div>
           <div>
@@ -363,6 +366,24 @@ export function App() {
           </article>
         </div>
       </section>
+
+      <Suspense
+        fallback={
+          <section className="pose-panel" aria-label="G1 三维姿态模型">
+            <p role="status">正在加载三维姿态工作台…</p>
+          </section>
+        }
+      >
+        <G1Viewer
+          joints={snapshot?.robot?.joints ?? []}
+          hipImuRpy={snapshot?.robot?.hip_imu?.rpy ?? null}
+          hipImuAgeMs={hipImuAge}
+          hipImuState={hipImuState}
+          lowStateAgeMs={sourceAge ?? null}
+          lowStateState={lowStateState}
+          modeMachine={snapshot?.robot?.mode_machine ?? null}
+        />
+      </Suspense>
 
       <section className="joint-panel" aria-label="G1 29DoF 关节遥测">
         <div className="section-heading">

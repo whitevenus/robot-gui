@@ -140,6 +140,7 @@ h2 {
 .connection-panel,
 .control-panel,
 .source-panel,
+.pose-panel,
 .joint-panel {
   margin-top: 16px;
   padding: 22px;
@@ -147,6 +148,76 @@ h2 {
   border-radius: 14px;
   background: #fff;
   box-shadow: 0 2px 8px rgb(16 24 40 / 3%);
+}
+
+.pose-panel {
+  overflow: hidden;
+}
+
+.view-reset {
+  margin-bottom: 17px;
+  padding: 8px 12px;
+  border: 1px solid #cbd5df;
+  border-radius: 8px;
+  background: #fff;
+  color: #344054;
+  cursor: pointer;
+}
+
+.view-reset:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.pose-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  color: #667085;
+  font-size: 12px;
+}
+
+.pose-canvas {
+  height: 440px;
+  overflow: hidden;
+  border: 1px solid #24364a;
+  border-radius: 10px;
+  background:
+    radial-gradient(ellipse at 50% 30%, #18283a 0%, #0b121b 76%);
+}
+
+.pose-canvas canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.pose-status {
+  margin: 12px 0 5px;
+  color: #226b49;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.pose-status-stale,
+.pose-status-mapping-error,
+.pose-status-model-mismatch,
+.pose-status-load-error,
+.pose-status-loading {
+  color: #9a5b0b;
+}
+
+.pose-status-load-error,
+.pose-status-mapping-error {
+  color: #a52f35;
+}
+
+.pose-disclaimer {
+  margin: 0;
+  color: #667085;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .connection-panel dl {
@@ -362,5 +433,14 @@ footer {
 
   .section-heading > span {
     padding-bottom: 14px;
+  }
+
+  .pose-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .pose-canvas {
+    height: 330px;
   }
 }

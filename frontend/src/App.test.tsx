@@ -3,6 +3,32 @@ import { act, cleanup, render, screen, within } from "@testing-library/react";
 
 import { App } from "./App";
 
+vi.mock("./G1Viewer", () => ({
+  G1Viewer: ({
+    joints,
+    hipImuAgeMs,
+    hipImuState,
+    lowStateAgeMs,
+    lowStateState,
+    modeMachine,
+  }: {
+    joints: unknown[];
+    hipImuAgeMs: number | null;
+    hipImuState: string;
+    lowStateAgeMs: number | null;
+    lowStateState: string;
+    modeMachine: number | null;
+  }) => (
+    <section
+      aria-label="G1 三维姿态模型"
+      data-mode-machine={modeMachine ?? "unknown"}
+    >
+      Pose: {lowStateState}/{hipImuState} · {lowStateAgeMs ?? "—"}/
+      {hipImuAgeMs ?? "—"} ms · {joints.length} joints
+    </section>
+  ),
+}));
+
 class MockWebSocket {
   static instances: MockWebSocket[] = [];
   onopen: (() => void) | null = null;
@@ -23,14 +49,14 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("Mock workstation", () => {
-  it("clearly identifies Mock mode and keeps real controls disabled", () => {
+describe("Real telemetry workstation", () => {
+  it("requires real telemetry and keeps hardware controls disabled", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
 
     render(<App />);
 
-    expect(screen.getByText("MOCK · 不连接真实机器人")).toBeInTheDocument();
-    expect(screen.getByText(/当前为开发 Mock 模式/)).toBeInTheDocument();
+    expect(screen.getByText("REAL · 等待连接")).toBeInTheDocument();
+    expect(screen.getByText(/仅接受真实 Unitree SDK2\/DDS 遥测/)).toBeInTheDocument();
     expect(
       screen.getByText("此版本仅提供只读遥测，尚未开放任何真机控制能力。"),
     ).toBeInTheDocument();
@@ -40,7 +66,7 @@ describe("Mock workstation", () => {
     }
   });
 
-  it("shows the received Mock source and its non-real connection state", () => {
+  it("shows the real SDK2/DDS source and connection state", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<App />);
     const socket = MockWebSocket.instances[0];
@@ -51,13 +77,13 @@ describe("Mock workstation", () => {
         new MessageEvent("message", {
           data: JSON.stringify({
             schema_version: "1.0",
-            mode: "mock",
+            mode: "real",
             connection: {
-              state: "mock",
-              interface: null,
+              state: "connected",
+              interface: "eth0",
               last_data_at: "2026-10-19T07:00:00+00:00",
               error: null,
-              message: "Mock 数据源已启动；当前未连接真实机器人或 DDS。",
+              message: "已收到 G1 LowState 遥测。",
             },
             sources: {
               low_state: {
@@ -70,7 +96,7 @@ describe("Mock workstation", () => {
             capabilities: {
               controls: {
                 available: false,
-                reason: "mock_mode_control_disabled",
+                reason: "telemetry_release_is_read_only",
               },
             },
           }),
@@ -78,10 +104,40 @@ describe("Mock workstation", () => {
       );
     });
 
-    expect(screen.getByText("Mock 数据源")).toBeInTheDocument();
-    expect(screen.getByText(/\s12 ms/)).toBeInTheDocument();
+    expect(screen.getByText("已连接")).toBeInTheDocument();
     expect(
-      screen.getByText("Mock 模式未连接真实机器人"),
+      screen.getByText("Unitree SDK2 / DDS（eth0）"),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("region", { name: "连接状态" })).getByText(
+        /\s12 ms/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("已收到 G1 LowState 遥测。")).toHaveLength(2);
+  });
+
+  it("rejects snapshots from a non-real runtime", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<App />);
+    const socket = MockWebSocket.instances[0];
+
+    act(() => {
+      socket.onopen?.();
+      socket.onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            schema_version: "1.0",
+            mode: "mock",
+            connection: { state: "mock" },
+            sources: { low_state: { state: "fresh" } },
+          }),
+        }),
+      );
+    });
+
+    expect(screen.getByText("REAL · 等待连接")).toBeInTheDocument();
+    expect(
+      screen.getByText("遥测 schema、运行模式或必需字段不受支持。"),
     ).toBeInTheDocument();
   });
 
@@ -116,7 +172,7 @@ describe("Mock workstation", () => {
             capabilities: {
               controls: {
                 available: false,
-                reason: "mock_mode_control_disabled",
+                reason: "telemetry_release_is_read_only",
               },
             },
           }),
@@ -130,13 +186,20 @@ describe("Mock workstation", () => {
     });
 
     expect(screen.getByText("WebSocket 未连接")).toBeInTheDocument();
-    expect(screen.getByText(/\s512 ms/)).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("region", { name: "连接状态" })).getByText(
+        /\s512 ms/,
+      ),
+    ).toBeInTheDocument();
     const freshnessRegion = screen.getByRole("region", {
       name: "遥测源新鲜度",
     });
     expect(within(freshnessRegion).getByText("delayed")).toBeInTheDocument();
     expect(within(freshnessRegion).getByText("年龄：512 ms")).toBeInTheDocument();
     expect(screen.getByText("数据延迟")).toBeInTheDocument();
+    expect(
+      screen.getByText("Pose: delayed/unknown · 512/— ms · 0 joints"),
+    ).toBeInTheDocument();
 
     act(() => {
       vi.advanceTimersByTime(1000);
@@ -144,9 +207,12 @@ describe("Mock workstation", () => {
 
     expect(within(freshnessRegion).getByText("offline")).toBeInTheDocument();
     expect(screen.getByText("未连接")).toBeInTheDocument();
+    expect(
+      screen.getByText("Pose: offline/unknown · 1512/— ms · 0 joints"),
+    ).toBeInTheDocument();
   });
 
-  it("renders all semantic joint rows and auxiliary telemetry from the schema", () => {
+  it("renders all semantic joint rows and auxiliary telemetry from the schema", async () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<App />);
     const socket = MockWebSocket.instances[0];
@@ -170,13 +236,13 @@ describe("Mock workstation", () => {
         new MessageEvent("message", {
           data: JSON.stringify({
             schema_version: "1.0",
-            mode: "mock",
+            mode: "real",
             connection: {
-              state: "mock",
-              interface: null,
+              state: "connected",
+              interface: "eth0",
               last_data_at: "2026-10-19T07:00:00+00:00",
               error: null,
-              message: "Mock telemetry.",
+              message: "Real telemetry.",
             },
             sources: Object.fromEntries(
               ["low_state", "bms", "hip_imu", "torso_imu", "fsm"].map(
@@ -223,5 +289,11 @@ describe("Mock workstation", () => {
     expect(screen.getByText("joint_28")).toBeInTheDocument();
     expect(screen.getByText(/SOC\s*92\s*%.*SOH\s*100\s*%/)).toBeInTheDocument();
     expect(screen.getByText("ID 500 · Mode unknown")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Pose: fresh/fresh · 5/5 ms · 29 joints"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "G1 三维姿态模型" }),
+    ).toHaveAttribute("data-mode-machine", "2");
   });
 });

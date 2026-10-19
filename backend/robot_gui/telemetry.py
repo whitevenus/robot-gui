@@ -146,12 +146,7 @@ class TelemetryHub:
             return None if sample is None or sample.error else sample.data
 
         low_state_source = sources["low_state"]["state"]
-        if mode == "mock":
-            connection_state = "mock"
-            connection_message = (
-                "当前遥测来自 Fake SDK 数据源；未连接真实机器人或 DDS。"
-            )
-        elif adapter_error:
+        if adapter_error:
             connection_state = "error"
             connection_message = adapter_error
         elif low_state_source == "fresh":
