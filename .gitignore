@@ -1,0 +1,9 @@
+.loop-state.json
+.venv/
+node_modules/
+dist/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.egg-info/
+*.tsbuildinfo
