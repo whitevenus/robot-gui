@@ -1,0 +1,74 @@
+[
+  {
+    "prompt": "/smell",
+    "description": "Basic invocation — should trigger full project analysis"
+  },
+  {
+    "prompt": "find code smells in this project",
+    "description": "Natural language trigger — full code smell analysis"
+  },
+  {
+    "prompt": "detect architecture anti-patterns in the src/ directory",
+    "description": "Scoped analysis to a specific directory"
+  },
+  {
+    "prompt": "分析一下这个项目的架构坏味道",
+    "description": "Chinese trigger — architecture smell analysis"
+  },
+  {
+    "prompt": "找出反模式",
+    "description": "Chinese trigger — anti-pattern detection"
+  },
+  {
+    "prompt": "Does this codebase have any God Objects or Big Ball of Mud?",
+    "description": "Specific anti-pattern query"
+  },
+  {
+    "prompt": "run a quick architecture health check",
+    "description": "Quick scan — should use critical-only mode"
+  },
+  {
+    "prompt": "check the recent changes for code smells",
+    "description": "Git diff scoped analysis"
+  },
+  {
+    "prompt": "analyze code complexity and find algorithmic hotspots",
+    "description": "Complexity-focused analysis — detect N+1, nested loops, etc."
+  },
+  {
+    "prompt": "find N+1 queries and O(n^2) patterns",
+    "description": "Specific complexity anti-pattern query"
+  },
+  {
+    "prompt": "复杂度分析",
+    "description": "Chinese trigger — complexity analysis"
+  },
+  {
+    "prompt": "Are there any performance bottlenecks or inefficient algorithms?",
+    "description": "Performance/complexity smell query — static complexity is a candidate until workload and impact are measured"
+  },
+  {
+    "prompt": "Analyze this module that mixes UI rendering, database access, and business rules, and report every violated principle.",
+    "description": "Deduplication — produce one primary SRP finding; Separation of Concerns and KISS may be related principles, not additional findings"
+  },
+  {
+    "prompt": "Check the repeated type switch in three handlers and tell me whether it violates OCP, DRY, and Composition.",
+    "description": "Deduplication — produce one OCP finding with DRY/Composition as related principles"
+  },
+  {
+    "prompt": "Inspect a generated 600-line mapping file and a nested loop over at most 20 items on a cold startup path.",
+    "description": "False-positive control — do not promote line count or Big-O syntax to a finding without context or measured impact"
+  },
+  {
+    "prompt": "The order endpoint makes 101 queries for 100 items and the trace shows 1.8 seconds of database latency. Analyze the N+1 issue.",
+    "description": "Measure First — report a measured finding with baseline, impact, confidence, and a verification benchmark"
+  },
+  {
+    "prompt": "Review an interface, factory, and adapter with exactly one implementation and no current variation requirement.",
+    "description": "KISS/YAGNI — question speculative abstraction instead of recommending more OCP/DIP layers"
+  },
+  {
+    "prompt": "Invalid configuration is accepted at startup and only fails deep inside the first request.",
+    "description": "Fail Fast — report the delayed failure and preserve error, retry, transaction, and cleanup semantics in the recommendation"
+  }
+]

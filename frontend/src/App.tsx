@@ -96,6 +96,14 @@ function formatNumber(value: number | null | undefined): string {
   return value === null || value === undefined ? "—" : value.toFixed(3);
 }
 
+function sourceStateLabel(state: TelemetrySnapshot["sources"][string]["state"]): string {
+  if (state === "fresh") return "最新";
+  if (state === "delayed") return "延迟";
+  if (state === "offline") return "离线";
+  if (state === "invalid") return "无效";
+  return "等待";
+}
+
 function liveSourceAge(
   source: TelemetrySnapshot["sources"][string],
   elapsedMs: number,
@@ -249,7 +257,7 @@ export function App() {
           <span className="card-label">页面遥测通道</span>
           <strong>{connected ? "WebSocket 已连接" : "WebSocket 未连接"}</strong>
           <span className="subtle">
-            {lowStateState === "unknown" ? "等待数据" : lowStateState}
+            {sourceStateLabel(lowStateState)}
           </span>
         </article>
       </section>
@@ -283,11 +291,11 @@ export function App() {
         </dl>
       </section>
 
-      <section className="source-panel" aria-label="遥测源新鲜度">
+      <section className="source-panel" aria-label="实时遥测数据">
         <div className="section-heading">
           <div>
-            <p className="eyebrow">TELEMETRY SOURCES</p>
-            <h2>遥测源与数据新鲜度</h2>
+            <p className="eyebrow">LIVE TELEMETRY</p>
+            <h2>实时数据</h2>
           </div>
           <span>
             {snapshot?.robot?.product_id ?? "g1"}{" "}
@@ -295,76 +303,72 @@ export function App() {
             {snapshot?.robot?.joint_count ?? 29} DoF
           </span>
         </div>
-        <div className="source-grid">
-          {telemetrySources.map(([key, label]) => {
-            const source = snapshot?.sources[key];
-            const ageMs = source
-              ? liveSourceAge(source, elapsedSinceSnapshot)
-              : null;
-            return (
-              <article className="source-card" key={key}>
-                <span>{label}</span>
-                <strong>
-                  {source
-                    ? liveSourceState(source, elapsedSinceSnapshot)
-                    : "unknown"}
-                </strong>
-                <small>
-                  {ageMs === null
-                    ? "年龄：—"
-                    : `年龄：${ageMs} ms`}
-                </small>
-                {source?.error && (
-                  <small className="source-error">{source.error}</small>
-                )}
-              </article>
-            );
-          })}
-        </div>
         <div className="auxiliary-grid">
           <article>
             <h3>BMS 电池</h3>
-            <p>
-              SOC {snapshot?.robot?.bms?.soc_pct ?? "—"}% · SOH{" "}
-              {snapshot?.robot?.bms?.soh_pct ?? "—"}%
+            <p className="telemetry-primary">
+              {snapshot?.robot?.bms?.soc_pct ?? "—"}<small>% SOC</small>
             </p>
+            <p>SOH {snapshot?.robot?.bms?.soh_pct ?? "—"}%</p>
             <small>
-              原始电压：
+              电压 raw：
               {snapshot?.robot?.bms?.voltage_raw?.join(", ") ?? "—"}
             </small>
             <small>
               电流 raw：{snapshot?.robot?.bms?.current_raw ?? "—"} · 温度 raw：
-              {snapshot?.robot?.bms?.temperature_raw?.join(", ") ?? "—"} · 循环：
-              {snapshot?.robot?.bms?.cycle_count ?? "—"}
+              {snapshot?.robot?.bms?.temperature_raw?.join(", ") ?? "—"}
             </small>
+            <small>循环次数：{snapshot?.robot?.bms?.cycle_count ?? "—"}</small>
           </article>
           <article>
             <h3>LowState IMU</h3>
-            <p>
-              RPY{" "}
+            <p className="telemetry-primary telemetry-vector">
               {snapshot?.robot?.hip_imu?.rpy?.map(formatNumber).join(", ") ?? "—"}
             </p>
+            <small>RPY</small>
           </article>
           <article>
             <h3>Secondary IMU</h3>
-            <p>
-              RPY{" "}
+            <p className="telemetry-primary telemetry-vector">
               {snapshot?.robot?.torso_imu?.rpy?.map(formatNumber).join(", ") ??
                 "—"}
             </p>
+            <small>RPY</small>
           </article>
           <article>
             <h3>FSM</h3>
-            <p>
-              ID {snapshot?.robot?.fsm?.id ?? "—"} · Mode{" "}
-              {snapshot?.robot?.fsm?.mode ?? "unknown"}
+            <p className="telemetry-primary">
+              {snapshot?.robot?.fsm?.id ?? "—"}
+              <small>FSM ID</small>
             </p>
+            <p>模式：{snapshot?.robot?.fsm?.mode ?? "unknown"}</p>
             <small>
               Mode machine（URDF selector）：
               {snapshot?.robot?.mode_machine ?? "—"}
             </small>
           </article>
         </div>
+        <section className="source-health" aria-label="数据来源状态">
+          {telemetrySources.map(([key, label]) => {
+            const source = snapshot?.sources[key];
+            const ageMs = source
+              ? liveSourceAge(source, elapsedSinceSnapshot)
+              : null;
+            const state = source
+              ? liveSourceState(source, elapsedSinceSnapshot)
+              : "unknown";
+            return (
+              <div className={`source-health-item state-${state}`} key={key}>
+                <span>{label}</span>
+                <strong>{sourceStateLabel(state)}</strong>
+                <small>{ageMs === null ? "—" : `${ageMs} ms`}</small>
+                {source?.error && (
+                  <small className="source-error">{source.error}</small>
+                )}
+              </div>
+            );
+          })}
+        </section>
       </section>
 
       <Suspense

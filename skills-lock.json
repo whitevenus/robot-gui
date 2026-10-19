@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "skills": {
+    "article-icons": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "b59c13193de1f62ba9ec2d81632639adac97584bcb08c888b38645332f46f056"
+    },
+    "code-to-spec": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "bcaa5521393b394e5dd268117c514c0a25e680bd130f9b95c17d85a6255cdc3a"
+    },
+    "design-it": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "e0c6b44375bb90be784a5ad054e74aed1e47ab892346e413a3033fedbb32b89f"
+    },
+    "graph": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "87d59301a2257948418e6f2ec0acd7ff3dfa023952772814be0ead6863ec30ff"
+    },
+    "humanize-it": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "3e4e025c74cce354bf1a2d0cb795e63ffcffbeaca4a5de07760ba54b78e38f6f"
+    },
+    "insight-diagram": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "cd850138360eb4a03ed05fdb7b461461ee6ea86cb808034f580881ac263bfd7a"
+    },
+    "listenhub-tts": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "19af01711e1a9d694591ec57e14b0661f5f036aa6dca097ab8d513532f4b80a6"
+    },
+    "loop-it": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "e6fcf92105887b90e0c7b801de3a3fc3c04743df1fd95505f4ce1ffb8a4142c1"
+    },
+    "modern-go": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "35b142645b47cb38c49652c9b4d7e207b453c0b4529abe2e35de82afbd120ba8"
+    },
+    "note-it": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "7b3dd3cdd70cf31ff2e347030da3674d0e165390f17ff01fbaeb3a1fae3e9166"
+    },
+    "prd": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "083ed6c72c2870b9d6f75955731c92c03b853b7c5a0ed3961a91b629f3fa60b4"
+    },
+    "prd-to-spec": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "e0d17d241528f61136984fbb574f8b0e8bb9d7f4964d011cfbd2dd9651c43c0e"
+    },
+    "refactor": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "4d6e1a1e4a20d14ec8f1fac02d17aca9f9fb08e0e26fc72ef3abde9967e2557e"
+    },
+    "review-it": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "b83f5142ae6bf70b4062992b8eb7311413494d39d51670d6cb6b2d65c3b3ae66"
+    },
+    "ship-it": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "de500774d58910af87a5059e349a5e9f175e2b0e0217c9fbe955a5baf65d56b8"
+    },
+    "smell": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "314483c375777d094b7ffbdf2f58c4f8bdedcd906901f3f10e36cc1f8ea04565"
+    },
+    "to-design": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "3d9aede58b9e404deb589f875dd46ced6c2cc9f6d2d484bfc86ac604a67f9529"
+    },
+    "to-issues": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "9472365761f61e606e9a2637e408876846ebb7ce78b1400dce3eeb90b0342d2a"
+    },
+    "understand": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "f304dd31fddcbe0ef6b3bab28976739044f759db62ffc546747676da16d22c49"
+    },
+    "walkthrough": {
+      "source": "../../../../tmp/goal-workflow-master",
+      "sourceType": "local",
+      "computedHash": "d00d65c662e56f7a773650b66e2733f5abee350596824ba37f638a7b4b332ac4"
+    }
+  }
+}

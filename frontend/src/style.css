@@ -262,13 +262,6 @@ dd {
   font-size: 12px;
 }
 
-.source-grid {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.source-card,
 .auxiliary-grid article {
   display: flex;
   min-width: 0;
@@ -280,28 +273,16 @@ dd {
   background: #fbfcfe;
 }
 
-.source-card > span,
-.source-card small,
 .auxiliary-grid small {
   color: #667085;
   font-size: 11px;
-}
-
-.source-card strong {
-  font-size: 15px;
-  text-transform: uppercase;
-}
-
-.source-error {
-  color: #a52f35 !important;
-  overflow-wrap: anywhere;
 }
 
 .auxiliary-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
-  margin-top: 12px;
+  margin-top: 2px;
 }
 
 .auxiliary-grid h3 {
@@ -312,6 +293,69 @@ dd {
 .auxiliary-grid p {
   margin: 0;
   font-size: 13px;
+}
+
+.auxiliary-grid .telemetry-primary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: #182230;
+  font-size: 26px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+}
+
+.auxiliary-grid .telemetry-primary small {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.auxiliary-grid .telemetry-vector {
+  min-height: 31px;
+  font-size: 16px;
+}
+
+.source-health {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #edf0f4;
+}
+
+.source-health-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: #667085;
+  font-size: 11px;
+}
+
+.source-health-item strong {
+  color: #226b49;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.source-health-item small {
+  color: #8b95a3;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.source-health-item.state-delayed strong,
+.source-health-item.state-invalid strong {
+  color: #9a5b0b;
+}
+
+.source-health-item.state-offline strong {
+  color: #a52f35;
+}
+
+.source-error {
+  color: #a52f35 !important;
+  overflow-wrap: anywhere;
 }
 
 .table-scroll {
@@ -399,7 +443,6 @@ footer {
 @media (max-width: 760px) {
   .status-grid,
   .control-list,
-  .source-grid,
   .auxiliary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -420,7 +463,6 @@ footer {
   .status-grid,
   .connection-panel dl,
   .control-list,
-  .source-grid,
   .auxiliary-grid {
     grid-template-columns: 1fr;
   }

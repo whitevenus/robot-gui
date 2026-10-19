@@ -191,11 +191,11 @@ describe("Real telemetry workstation", () => {
         /\s512 ms/,
       ),
     ).toBeInTheDocument();
-    const freshnessRegion = screen.getByRole("region", {
-      name: "遥测源新鲜度",
+    const sourceHealth = screen.getByRole("region", {
+      name: "数据来源状态",
     });
-    expect(within(freshnessRegion).getByText("delayed")).toBeInTheDocument();
-    expect(within(freshnessRegion).getByText("年龄：512 ms")).toBeInTheDocument();
+    expect(within(sourceHealth).getByText("延迟")).toBeInTheDocument();
+    expect(within(sourceHealth).getByText("512 ms")).toBeInTheDocument();
     expect(screen.getByText("数据延迟")).toBeInTheDocument();
     expect(
       screen.getByText("Pose: delayed/unknown · 512/— ms · 0 joints"),
@@ -205,7 +205,7 @@ describe("Real telemetry workstation", () => {
       vi.advanceTimersByTime(1000);
     });
 
-    expect(within(freshnessRegion).getByText("offline")).toBeInTheDocument();
+    expect(within(sourceHealth).getByText("离线")).toBeInTheDocument();
     expect(screen.getByText("未连接")).toBeInTheDocument();
     expect(
       screen.getByText("Pose: offline/unknown · 1512/— ms · 0 joints"),
@@ -287,8 +287,11 @@ describe("Real telemetry workstation", () => {
     expect(screen.getAllByRole("row")).toHaveLength(30);
     expect(screen.getByText("joint_0")).toBeInTheDocument();
     expect(screen.getByText("joint_28")).toBeInTheDocument();
-    expect(screen.getByText(/SOC\s*92\s*%.*SOH\s*100\s*%/)).toBeInTheDocument();
-    expect(screen.getByText("ID 500 · Mode unknown")).toBeInTheDocument();
+    expect(screen.getByText("92")).toBeInTheDocument();
+    expect(screen.getByText("SOH 100%")).toBeInTheDocument();
+    expect(screen.getByText("500")).toBeInTheDocument();
+    expect(screen.getAllByText("0.000, 0.000, 0.000")).toHaveLength(2);
+    expect(screen.getByText("模式：unknown")).toBeInTheDocument();
     expect(
       await screen.findByText("Pose: fresh/fresh · 5/5 ms · 29 joints"),
     ).toBeInTheDocument();
