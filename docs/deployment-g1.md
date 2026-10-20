@@ -103,8 +103,46 @@ npm run dev          # 开发
 npm run build        # 产物在 frontend/dist，可交给任意静态服务器
 ```
 
+**开发机连机器人**（后端在机器人、只在本机开前端）：
+
+```bash
+export ROBOT_GUI_BACKEND=http://192.168.110.165:8000
+npm run dev -- --host 0.0.0.0 --port 5173
+```
+
+不设 `ROBOT_GUI_BACKEND` 时代理仍指向本机 8000（机器人本机部署的行为不变）。
+
+机器人上的封装脚本 `~/robot-gui.sh`：
+
+```bash
+bash ~/robot-gui.sh start            # 只读
+bash ~/robot-gui.sh start-control    # 开启真机控制 + 机器人扬声器语音
+bash ~/robot-gui.sh restart-control  # 同上并重启
+bash ~/robot-gui.sh status
+bash ~/robot-gui.sh stop
+```
+
+`start-control` 等价于设置 `ROBOT_GUI_CONTROLS_ENABLED=1`、`ROBOT_GUI_FSM_WHITELIST=501`、
+`ROBOT_GUI_AUDIO_ENABLED=1` 后再启动。脚本用 `setsid` 启动，SSH 断开或终端关闭都不会带走进程。
+
 **部署安全**：HTTP 服务面向局域网且不实现登录（FR-20）。只放在受信任网络，
 禁止直接暴露到公网。页面上的"确认"是误触防护，**不是身份认证**。
+
+### 2.5 Unitree SDK2 的 CRC 动态库
+
+SDK2 的 `setup.py` 不把 `utils/lib/*.so` 打进 wheel，`pip`/`uv` 安装完成后
+`crc_aarch64.so` 会缺失。SDK 的 `utils/crc.py` 用
+`ctypes.CDLL(<utils>/lib/crc_<arch>.so)` 加载它，缺文件时报的是
+`cannot open shared object file`，指向共享库而不是安装不完整，很难排查。
+
+更隐蔽的是**只读遥测不经过 CRC**：后端能连上机器人、页面能显示数据，
+只有真正下发 LowCmd 的那一刻才失败——也就是接管动作做到一半才炸。
+
+`robot_gui/sdk_runtime.py` 在导入 SDK 之前把 `.so` 从机器人上的已知 SDK 位置
+（`/usr/local/src/unitree_sdk2_python`、`/home/unitree/Program/unitree_sdk2_python`）
+补进虚拟环境；补不齐时启动日志会给出明确说明。也可以用
+`UNITREE_SDK_LIB_DIR` 指定来源目录。**每次 `uv sync` 之后需要重新补一次**
+（后端下次启动时会自动补上）。
 
 ---
 
