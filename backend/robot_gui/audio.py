@@ -29,6 +29,30 @@ class G1AudioClient(Protocol):
     def PlayStop(self, app_name: str) -> Any: ...
 
 
+class AudioClientFactory:
+    """按需创建 SDK2 的 AudioClient。
+
+    DDS 通道由后端统一管理，AudioClient 需要在 ChannelFactory 初始化之后使用。
+    这里做成懒加载：只有真的要播语音时才建立客户端，避免只读模式下多占一条 DDS 通道。
+    """
+
+    def __init__(self) -> None:
+        self._client: G1AudioClient | None = None
+
+    def get(self) -> G1AudioClient:
+        if self._client is None:
+            from unitree_sdk2py.g1.audio.g1_audio_client import AudioClient
+
+            client = AudioClient()
+            client.SetTimeout(2.0)
+            client.Init()
+            self._client = client
+        return self._client
+
+    def close(self) -> None:
+        self._client = None
+
+
 class AudioError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -49,15 +73,21 @@ def validate_pcm(pcm: bytes) -> None:
 class G1AudioPort:
     """把 PCM 推送到 G1 扬声器。"""
 
-    def __init__(self, client: G1AudioClient, app_name: str) -> None:
+    def __init__(self, client: G1AudioClient | AudioClientFactory, app_name: str) -> None:
         if not app_name:
             raise ValueError("必须指定 app_name")
-        self._client = client
+        self._client_source = client
         self._app_name = app_name
         self._lock = threading.Lock()
         self._active_stream_id = ""
         self._recovery_unconfirmed = False
         self._next_stream_id = 1
+
+    @property
+    def _client(self) -> G1AudioClient:
+        if isinstance(self._client_source, AudioClientFactory):
+            return self._client_source.get()
+        return self._client_source
 
     @property
     def recovery_unconfirmed(self) -> bool:

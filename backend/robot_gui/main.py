@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .actions import ActionStore, ActionStoreError
 from .adapters import TelemetryAdapter, UnitreeSdkTelemetryAdapter
-from .audio import G1AudioPort
+from .audio import AudioClientFactory, G1AudioPort
 from .control import ControlError, ControlService, ControlSettings, load_gains
 from .sdk_runtime import describe_crc_status, ensure_crc_libraries
 from .telemetry import TelemetryHub
@@ -47,6 +47,7 @@ class RuntimeSettings:
     transition_seconds: float = 2.0
     replay_speed: float = 1.0
     audio_app_name: str = "robot-gui"
+    audio_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> RuntimeSettings:
@@ -77,6 +78,10 @@ class RuntimeSettings:
             transition_seconds=float(os.getenv("ROBOT_GUI_TRANSITION_SECONDS", "2.0")),
             replay_speed=float(os.getenv("ROBOT_GUI_REPLAY_SPEED", "1.0")),
             audio_app_name=os.getenv("ROBOT_GUI_AUDIO_APP", "robot-gui"),
+            audio_enabled=os.getenv(
+                "ROBOT_GUI_AUDIO_ENABLED", "false"
+            ).strip().lower()
+            in {"1", "true", "yes", "on"},
         )
 
     def validate(self) -> None:
@@ -127,9 +132,15 @@ def create_app(
         secondary_imu_topic=runtime_settings.secondary_imu_topic,
     )
     store = ActionStore(runtime_settings.data_dir)
+    if audio_client is not None:
+        audio_source: Any = audio_client
+    elif runtime_settings.audio_enabled:
+        audio_source = AudioClientFactory()
+    else:
+        audio_source = None
     audio_port = (
-        G1AudioPort(audio_client, runtime_settings.audio_app_name)
-        if audio_client is not None
+        G1AudioPort(audio_source, runtime_settings.audio_app_name)
+        if audio_source is not None
         else None
     )
     control = ControlService(
@@ -174,6 +185,8 @@ def create_app(
             yield
         finally:
             control.release()
+            if isinstance(audio_source, AudioClientFactory):
+                audio_source.close()
             try:
                 await asyncio.to_thread(adapter.stop)
             except Exception:
