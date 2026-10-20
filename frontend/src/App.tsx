@@ -1,5 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 
+import { ActionWorkbench } from "./ActionWorkbench";
+
 const G1Viewer = lazy(() =>
   import("./G1Viewer").then((module) => ({ default: module.G1Viewer })),
 );
@@ -59,7 +61,7 @@ interface TelemetrySnapshot {
   };
 }
 
-const controlEntries = ["FSM 模式", "键盘行走", "手掰示教", "动作回放"];
+const controlEntries = ["FSM 模式切换", "键盘行走控制", "手掰示教"];
 const telemetrySources = [
   ["low_state", "LowState"],
   ["bms", "BMS 电池"],
@@ -211,7 +213,7 @@ export function App() {
           <h1>机器人状态工作台</h1>
         </div>
         <span className="mode-badge" role="status">
-          {snapshot ? "REAL · 只读遥测" : "REAL · 等待连接"}
+          {snapshot ? "REAL · 真实遥测" : "REAL · 等待连接"}
         </span>
       </header>
 
@@ -220,7 +222,8 @@ export function App() {
           i
         </span>
         <p>
-          可运行模式仅接受真实 Unitree SDK2/DDS 遥测；无法取得真实数据时不会生成替代状态。此版本不提供任何真机控制能力。
+          可运行模式仅接受真实 Unitree SDK2/DDS 遥测；无法取得真实数据时不会生成替代状态。
+          真机控制默认关闭，需显式开启并逐次确认后才会下发命令。
         </p>
       </section>
 
@@ -228,10 +231,14 @@ export function App() {
         <article className="status-card">
           <span className="card-label">运行模式</span>
           <strong>
-            真实遥测（只读）
+            {snapshot?.capabilities.controls.available
+              ? "真实遥测 + 真机控制"
+              : "真实遥测（只读）"}
           </strong>
           <span className="subtle">
-            SDK2/DDS 必须成功初始化
+            {snapshot?.capabilities.controls.available
+              ? "控制已开启，真机回放需逐次确认"
+              : "SDK2/DDS 必须成功初始化"}
           </span>
         </article>
         <article className="status-card">
@@ -438,13 +445,15 @@ export function App() {
         </div>
       </section>
 
-      <section className="control-panel" aria-label="真机控制能力">
+      <ActionWorkbench />
+
+      <section className="control-panel" aria-label="其他真机控制能力">
         <div>
           <p className="eyebrow">HARDWARE CONTROL</p>
-          <h2>真机控制</h2>
+          <h2>其余真机控制能力</h2>
         </div>
         <p className="disabled-explanation">
-          此版本仅提供只读遥测，尚未开放任何真机控制能力。
+          动作回放已在上方提供。以下能力本版仍未开放，按钮保持禁用而不是给出假可用状态。
         </p>
         <div className="control-list">
           {controlEntries.map((label) => (
@@ -452,7 +461,7 @@ export function App() {
               key={label}
               type="button"
               disabled
-              title="当前版本未开放真机控制"
+              title="当前版本未开放该真机控制能力"
             >
               {label}
               <span>不可用</span>

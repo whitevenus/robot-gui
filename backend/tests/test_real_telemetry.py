@@ -112,14 +112,19 @@ def test_real_status_has_29dof_telemetry_and_controls_disabled() -> None:
     assert snapshot["capabilities"]["controls"]["available"] is False
 
 
-def test_telemetry_test_adapter_is_injected_only_and_control_endpoint_stays_closed() -> None:
+def test_telemetry_test_adapter_is_injected_only_and_control_stays_closed(tmp_path) -> None:
     adapter = TelemetryTestAdapter()
-    app = real_test_app(adapter)
+    app = create_app(
+        RuntimeSettings(mode="real", dds_interface="test0", data_dir=tmp_path),
+        telemetry_adapter=adapter,
+    )
 
     with TestClient(app) as client:
-        response = client.post("/api/v1/control/sessions", json={"confirmed": True})
+        response = client.post(
+            "/api/v1/control/replay", json={"action": "demo", "confirmed": True}
+        )
 
-    assert response.status_code == 503
+    assert response.status_code == 409
     assert response.json()["detail"]["code"] == "capability_disabled"
     assert adapter.start_calls == 1
 
@@ -267,18 +272,23 @@ def test_missing_sdk_or_dds_fails_startup_without_mock_fallback() -> None:
             pass
 
 
-def test_runtime_rejects_mock_mode_missing_interface_and_enabled_controls() -> None:
+def test_runtime_rejects_mock_mode_missing_interface_and_bad_ranges(tmp_path) -> None:
     invalid_settings = (
         RuntimeSettings(mode="mock", dds_interface="test0"),
         RuntimeSettings(mode="real"),
-        RuntimeSettings(mode="real", dds_interface="test0", controls_enabled=True),
         RuntimeSettings(mode="real", dds_interface="test0", telemetry_push_hz=20.1),
+        RuntimeSettings(
+            mode="real",
+            dds_interface="test0",
+            controls_enabled=True,
+            fsm_whitelist=(),
+        ),
     )
     expected_messages = (
         "requires ROBOT_GUI_MODE=real",
         "ROBOT_GUI_DDS_INTERFACE is required",
-        "telemetry-only",
         "between 1 and 20",
+        "ROBOT_GUI_FSM_WHITELIST must list at least one FSM id",
     )
 
     for settings, expected_message in zip(invalid_settings, expected_messages):

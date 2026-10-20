@@ -72,6 +72,8 @@ class TelemetryHub:
         mode: str,
         interface: str | None,
         adapter_error: str | None,
+        controls_available: bool = False,
+        controls_reason: str = "controls_disabled",
     ) -> dict[str, Any]:
         now_monotonic = time.monotonic()
         now_utc = datetime.now(UTC).isoformat()
@@ -195,8 +197,8 @@ class TelemetryHub:
             },
             "capabilities": {
                 "controls": {
-                    "available": False,
-                    "reason": "telemetry_release_is_read_only",
+                    "available": controls_available,
+                    "reason": controls_reason,
                 }
             },
         }

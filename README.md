@@ -1,8 +1,22 @@
 # Robot GUI
 
 Robot GUI 是用于 Unitree 机器人遥测与运动工作流的开发工作站。本应用
-**仅连接真实设备并提供遥测**：必须配置 Unitree SDK2/DDS 连接，且不会生成
-Mock/Fake 运行时遥测。硬件控制功能保持禁用。
+**仅连接真实设备**：必须配置 Unitree SDK2/DDS 连接，且不会生成
+Mock/Fake 运行时遥测。硬件控制默认关闭，需由配置显式开启；开启后每一次真机动作
+都要求操作员逐次确认。
+
+## 本版范围
+
+- G1 实时遥测（29 个关节、BMS、两路 IMU、FSM）与浏览器内的三维姿态显示。
+- **`group` + `frames` 动作格式的动作库**，与
+  [g1-action-studio](references/g1-action-studio) 兼容 —— ECHO-G 生成的动作可以直接导入。
+- **上肢 17 关节（双臂 14 + 腰 3）的真机回放**，走 `rt/arm_sdk`：
+  下发任何控制命令之前先做轨迹规划、关节限位与自碰撞检查；
+  从实测姿态平滑进入动作，结束后返回该姿态，并交还控制权。
+- 可选的机器人自带扬声器讲解语音（16 kHz 单声道 16 bit PCM），与动作同步起播。
+
+FSM 模式切换、键盘行走、手掰示教**不在本版**；对应控件保持禁用，而不是假装可用。
+腿部始终由机器人内置运控负责。
 
 ## 连接真实 G1 运行
 
@@ -15,8 +29,16 @@ Mock/Fake 运行时遥测。硬件控制功能保持禁用。
 uv sync --directory backend --extra test
 $env:ROBOT_GUI_MODE = "real"
 $env:ROBOT_GUI_DDS_INTERFACE = "eth0"
+$env:ROBOT_GUI_DATA_DIR = "C:\robot-gui-data"
 uv run --directory backend uvicorn robot_gui.main:app --host 127.0.0.1
 ```
+
+`ROBOT_GUI_DATA_DIR` 是动作库目录。它**不会**被静默替换成安装目录下的默认路径：
+未配置时动作接口返回 `action_store_not_configured`。
+
+`g1-action-studio` 以**显式 path 依赖**声明在
+[`backend/pyproject.toml`](backend/pyproject.toml) 中，参考实现随仓库一起分发。
+后端直接调用它的 `planner` / `model` / `robot` 模块，而不是通过它的 CLI 起子进程。
 
 如果运行模式、SDK2 软件包、DDS 网络接口或必要的遥测初始化不可用，后端会明确报错并
 启动失败，不会回退到模拟数据。请在另一个终端中启动前端：
@@ -28,7 +50,19 @@ npm run dev
 ```
 
 打开 Vite 输出的 URL。页面会显示实际的 SDK2/DDS 连接状态以及接收数据源的新鲜度。
-硬件控制仍不可用，后端会拒绝所有控制会话请求。
+
+## 真机控制
+
+不设置 `ROBOT_GUI_CONTROLS_ENABLED=1` 就不会接受任何真机控制。开启后，回放请求
+只有在以下条件全部满足时才会被接受：操作员已确认、LowState 遥测新鲜、
+`mode_machine` 与 29DoF 机型一致、当前 FSM 在 `ROBOT_GUI_FSM_WHITELIST`（默认 `501`）列表内。
+
+轨迹规划与关节限位 / 自碰撞检查都在发布 `rt/arm_sdk` **之前**完成，
+因此被拒绝的动作不会产生任何控制命令。
+
+已知出厂状态的 G1 上 `rt/arm_sdk` 存在不止一个发布端点，**只读的控制权调查是前置条件**。
+完整的部署步骤、首次上机清单与本版边界见
+[`docs/deployment-g1.md`](docs/deployment-g1.md)。
 
 默认使用 G1 SDK 的 LowState 话题 `rt/lowstate`、BMS 话题
 `rt/lf/bmsstate` 和次级 IMU 话题 `rt/lf/secondary_imu`。可通过
@@ -40,7 +74,7 @@ LocoClient 轮询；当前公开的 SDK API 未提供 FSM 模式读取接口，�
 `ROBOT_GUI_TELEMETRY_HZ` 默认为 10，范围限制为 1–20 Hz。后端根据主机单调时钟记录的
 接收时间，报告各数据源的 `fresh`、`delayed`、`offline`、`invalid` 或 `unknown` 状态。
 如果缺少 SDK/网络接口或 DDS 初始化失败，后端将无法启动；不会回退到 Fake 数据，也不会启用
-控制功能。本版本为只读版本，不构成硬件控制安全保障，也不代表已完成现场验收。
+控制功能。本版本的控制路径不构成硬件控制安全保障，也不代表已完成现场验收。
 
 3D 查看器内置了 Unitree 官方的 G1 29DoF rev 1.0 URDF，以及以下来源中引用的全部 35 个
 STL 网格：

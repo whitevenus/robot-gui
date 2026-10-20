@@ -4,12 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "robot-gui-backend"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn[standard]>=0.30,<1",
+  # 上肢动作的规划、避碰与真机会话直接复用 g1-action-studio 的模块（不是它的 CLI）。
+  # 参考实现放在 references/ 下随仓库分发，这里以显式 path 依赖声明，避免隐式依赖。
+  # planning extra 提供 MuJoCo（几何检测）与 OMPL（衔接段绕行，Linux）。
+  "g1-action-studio[planning]",
 ]
+
+[tool.uv.sources]
+g1-action-studio = { path = "../references/g1-action-studio", editable = true }
 
 [project.optional-dependencies]
 test = [

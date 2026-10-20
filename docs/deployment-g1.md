@@ -1,0 +1,184 @@
+# 真机部署与验收清单
+
+本文是 Robot GUI 在 Unitree G1 上的部署步骤与首次上机前的检查清单。
+面向现场操作员，不替代受监督的人工验收。
+
+> 当前控制能力范围：上肢 17 关节（双臂 14 + 腰 3）的动作回放。
+> 腿部由机器人内置运控负责，本工作台不接管。
+> FSM 模式切换、键盘行走、手掰示教尚未开放，页面上的对应按钮保持禁用。
+
+---
+
+## 1. 部署位置
+
+| 组件 | 位置 | 说明 |
+|---|---|---|
+| 后端 | 机器人本机（或同网段电脑） | 必须能访问 `rt/lowstate` 与 `rt/arm_sdk` |
+| 前端 | 任意浏览器的开发电脑 | 通过 HTTP/WS 连到后端 |
+
+后端跑在机器人本机时不需要 SSH 转发：音频直接用 SDK2 的 `AudioClient` 推流。
+
+---
+
+## 2. 后端环境
+
+### 2.1 Python 版本
+
+机器人的 `~/venvs/g1-sdk` 是 **Python 3.8.10**（unitree-sdk2py 1.0.1）。
+本工作台要求 **Python 3.11+**（g1-action-studio 的 `requires-python`）。
+
+两者必须分开：SDK 用 3.8 的系统环境，工作台另建 3.11+ 的虚拟环境。
+`unitree_sdk2py` 本身兼容 3.8，在 3.11 上也能装（原生扩展 `crc_aarch64.so` 随包提供）。
+
+### 2.2 安装
+
+```bash
+cd robot-gui
+uv sync --directory backend --extra test
+```
+
+`g1-action-studio` 通过 `backend/pyproject.toml` 的 `tool.uv.sources` 以**显式 path 依赖**
+指向 `references/g1-action-studio`，随仓库分发，不需要单独安装。
+`planning` extra 会装 MuJoCo（几何检测）与 OMPL（衔接段绕行，仅 Linux）。
+
+### 2.3 配置
+
+```bash
+export ROBOT_GUI_MODE=real
+export ROBOT_GUI_DDS_INTERFACE=eth0          # 机器人内部 DDS 网卡
+export ROBOT_GUI_DATA_DIR=/opt/robot-gui-data # 动作库目录，必须显式配置
+export ROBOT_GUI_CONTROLS_ENABLED=1           # 开启真机控制；不设置则只读
+export ROBOT_GUI_FSM_WHITELIST=501            # 允许回放的 FSM（501=三自由度腰部常规运控）
+export ROBOT_GUI_TRANSITION_SECONDS=2.0       # 进入/返回的过渡段时长
+export ROBOT_GUI_REPLAY_SPEED=1.0
+```
+
+| 变量 | 默认 | 含义 |
+|---|---|---|
+| `ROBOT_GUI_MODE` | `real` | 只接受 `real`；其他值启动即失败 |
+| `ROBOT_GUI_DDS_INTERFACE` | 无 | **必填**，DDS 网卡 |
+| `ROBOT_GUI_DATA_DIR` | 无 | **动作库目录**。未配置时动作接口返回 `action_store_not_configured`，不会静默回退到安装目录 |
+| `ROBOT_GUI_CONTROLS_ENABLED` | `false` | 开启后才接受回放请求 |
+| `ROBOT_GUI_FSM_WHITELIST` | `501` | 逗号分隔；不在列表内的 FSM 一律拒绝下发 |
+| `ROBOT_GUI_GAINS` | 内置 60/1.5 | 增益 JSON 路径，结构同 `g1-action-studio/examples/gains.json` |
+| `ROBOT_GUI_TRANSITION_SECONDS` | `2.0` | 进入与返回的衔接段时长 |
+| `ROBOT_GUI_REPLAY_SPEED` | `1.0` | 动作速度倍率 |
+| `ROBOT_GUI_AUDIO_APP` | `robot-gui` | 音频流的应用标识 |
+
+### 2.4 启动
+
+```bash
+cd robot-gui
+uv run --directory backend uvicorn robot_gui.main:app --host 0.0.0.0 --port 8000
+```
+
+前端：
+
+```bash
+cd robot-gui/frontend
+npm install
+npm run dev          # 开发
+npm run build        # 产物在 frontend/dist，可交给任意静态服务器
+```
+
+**部署安全**：HTTP 服务面向局域网且不实现登录（FR-20）。只放在受信任网络，
+禁止直接暴露到公网。页面上的"确认"是误触防护，**不是身份认证**。
+
+---
+
+## 3. 动作库准备
+
+动作库目录结构：
+
+```
+$ROBOT_GUI_DATA_DIR/
+├── p1_s0.json          # g1-action-studio 兼容的 group+frames 动作
+├── p2_s3.json
+└── audio/
+    ├── p1_s0.pcm       # 16 kHz / 单声道 / 16 bit 裸 PCM，与动作同名
+    └── p2_s3.pcm
+```
+
+把 ECHO-G 转出的动作拷进去即可（`echo-g/tools/echo_to_g1_action.py` 的产物）。
+同名 `.pcm` 存在时，回放会在进入段结束后起播语音，与手势对齐。
+
+也可以直接在页面上粘贴 JSON 导入。
+
+---
+
+## 4. 首次上机前：控制权只读调查（**必做**）
+
+`rt/arm_sdk` 上已知存在**两个发布端点**（`unitree-g1` 服务 + 本工作台）。
+在弄清仲裁机制之前启动自制发布者，有重复下发关节指令的风险。
+
+在机器人上执行（全部只读，不创建发布者）：
+
+```bash
+python3 inspect_g1_dds_publications.py eth0
+python3 observe_g1_arm_sdk.py eth0 --seconds 15
+python3 inspect_g1_loco_fsm.py eth0
+systemctl show -p MainPID -p ExecStart unitree-g1.service robot-g1.service
+```
+
+要拿到的结论：
+
+1. `rt/arm_sdk` 上另一个发布端点是谁，它与 `motor_cmd[29].q`（0-1 权重）的关系是什么；
+2. 本工作台发布时，内置运控会不会同时下发同一批关节；
+3. 结论不明确就不要开 `ROBOT_GUI_CONTROLS_ENABLED=1`。
+
+---
+
+## 5. 首次上机操作清单
+
+现场必须有人只负责观察与人工停机（遥控器），学生不在场。
+
+| # | 步骤 | 判据 |
+|---|---|---|
+| 1 | 机器人正常站立，确认电量、场地净空、官方 App 可正常停机 | — |
+| 2 | 只读模式启动后端与前端 | 页面显示 LowState `fresh`、FSM `501`、数据年龄 < 300 ms |
+| 3 | 确认动作库里已导入要试的动作 | 列表里能看到名称、帧数、时长 |
+| 4 | **先开 `ROBOT_GUI_CONTROLS_ENABLED=1` 但不点回放** | 页面显示"真机控制已开启" |
+| 5 | 选**最短**的一段（建议 `p1_s2`，4.9 秒）回放 | 不跌倒、躯干不晃、双臂不撞腿 |
+| 6 | 观察 `rt/arm_sdk` 上的权重 | 接管时 0→1，结束时 1→0 |
+| 7 | 停止测试 | 机器人回到回放前姿态，控制权交还内置运控 |
+
+**软件停止按钮不等于物理急停。** 任何异常立即用遥控器停机。
+
+### 回放被拒绝时的含义
+
+| 错误码 | 含义 |
+|---|---|
+| `capability_disabled` | 未开 `ROBOT_GUI_CONTROLS_ENABLED` |
+| `confirmation_required` | 前端没有传 `confirmed` |
+| `telemetry_stale` | LowState 不新鲜，拒绝下发 |
+| `fsm_not_allowed` | 当前 FSM 不在白名单 |
+| `fsm_unknown` | 读不到 FSM |
+| `mode_machine_unsupported` | 不是 29DoF 机型 |
+| `control_busy` | 已有控制会话在跑 |
+| `action_invalid` / `action_exists` | 动作文件不合法或重名 |
+
+---
+
+## 6. 已知边界
+
+1. **没有整机监测。** 接管期间不读 IMU、骨盆高度或躯干倾斜；上肢大幅动作时的失衡
+   不会被后端主动发现。依赖现场观察与遥控器停机。
+2. **没有重力前馈。** 报文里 `tau` 恒为 0，手臂前伸时由 PD 自己扛重力，会出现下垂与
+   跟踪误差。
+3. **动作幅度受 ECHO-G 限速约束。** 转换阶段把速度峰值压到 0.8 rad/s，幅度保留
+   62–100%；这是刻意的安全取舍，不是模型输出被改坏。
+4. **词级时间戳是近似值。** 课程包的 TTS 不回字幕，时间轴由静音检测 + 按字分配
+   重建。ECHO-G 的时间偏置是高斯先验（sigma 0.25–2.0 s），这个精度在其容差内，
+   但不应当当作精确对齐。
+5. **没有并发控制。** 同一时刻只允许一个动作执行。
+
+---
+
+## 7. 验证记录
+
+| 项目 | 范围 | 状态 |
+|---|---|---|
+| 后端单元与接口测试 | 动作库、控制前置检查、音频端口、HTTP 接口 | `pytest` 24 项通过 |
+| 前端测试 | 遥测展示、动作列表、禁用态 | `vitest` 11 项通过 |
+| 离线规划与避碰 | 课程包 9 段动作整条样条限位 + 自碰撞 | 9/9 通过 |
+| 实机验收 | G1 真机接管、播放、返回、交还 | **未做**，需受监督现场执行 |

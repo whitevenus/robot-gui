@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 
 import { App } from "./App";
@@ -47,23 +47,94 @@ afterEach(() => {
   MockWebSocket.instances = [];
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+function stubFetch(routes: Record<string, unknown>) {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    const key = Object.keys(routes).find((route) => url.endsWith(route));
+    if (key === undefined) {
+      return new Response("not found", { status: 404 });
+    }
+    return new Response(JSON.stringify(routes[key]), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+beforeEach(() => {
+  // 动作工作台在挂载时就会拉取动作库与控制状态，默认给一个空实现，
+  // 避免每个用例都要重复准备 fetch 替身。
+  stubFetch({
+    "/api/v1/actions": { actions: [] },
+    "/api/v1/control/state": {
+      phase: "idle",
+      message: "",
+      action: "",
+      error_code: "",
+      available: false,
+      trajectory_duration_s: 0,
+      audio_playing: false,
+    },
+  });
 });
 
 describe("Real telemetry workstation", () => {
-  it("requires real telemetry and keeps hardware controls disabled", () => {
+  it("requires real telemetry and keeps unopened hardware controls disabled", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
+    stubFetch({ "/api/v1/actions": { actions: [] } });
 
     render(<App />);
 
     expect(screen.getByText("REAL · 等待连接")).toBeInTheDocument();
     expect(screen.getByText(/仅接受真实 Unitree SDK2\/DDS 遥测/)).toBeInTheDocument();
     expect(
-      screen.getByText("此版本仅提供只读遥测，尚未开放任何真机控制能力。"),
+      screen.getByText(/以下能力本版仍未开放，按钮保持禁用/),
     ).toBeInTheDocument();
 
-    for (const label of ["FSM 模式", "键盘行走", "手掰示教", "动作回放"]) {
+    for (const label of ["FSM 模式切换", "键盘行走控制", "手掰示教"]) {
       expect(screen.getByRole("button", { name: new RegExp(label) })).toBeDisabled();
     }
+  });
+
+  it("lists stored actions and refuses replay while controls are disabled", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    stubFetch({
+      "/api/v1/actions": {
+        actions: [
+          {
+            name: "p1_s0",
+            group: "arms_waist",
+            frames: 357,
+            duration_s: 11.9,
+            source: "robot_gui",
+          },
+        ],
+      },
+      "/api/v1/control/state": {
+        phase: "idle",
+        message: "",
+        action: "",
+        error_code: "",
+        available: false,
+        trajectory_duration_s: 0,
+        audio_playing: false,
+      },
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("p1_s0")).toBeInTheDocument();
+    expect(screen.getByText("arms_waist")).toBeInTheDocument();
+    expect(
+      screen.getByText(/真机控制未开启。设置 ROBOT_GUI_CONTROLS_ENABLED=1/),
+    ).toBeInTheDocument();
+    const replay = screen.getAllByRole("button", { name: "回放" })[0];
+    expect(replay).toBeDisabled();
   });
 
   it("shows the real SDK2/DDS source and connection state", () => {
@@ -284,7 +355,10 @@ describe("Real telemetry workstation", () => {
       );
     });
 
-    expect(screen.getAllByRole("row")).toHaveLength(30);
+    const jointRegion = screen.getByRole("region", {
+      name: "G1 29DoF 关节遥测",
+    });
+    expect(within(jointRegion).getAllByRole("row")).toHaveLength(30);
     expect(screen.getByText("joint_0")).toBeInTheDocument();
     expect(screen.getByText("joint_28")).toBeInTheDocument();
     expect(screen.getByText("92")).toBeInTheDocument();
