@@ -16,9 +16,18 @@ from .actions import ActionStore, ActionStoreError
 from .adapters import TelemetryAdapter, UnitreeSdkTelemetryAdapter
 from .audio import G1AudioPort
 from .control import ControlError, ControlService, ControlSettings, load_gains
+from .sdk_runtime import describe_crc_status, ensure_crc_libraries
 from .telemetry import TelemetryHub
 
 logger = logging.getLogger(__name__)
+
+# Unitree SDK2 的 CRC 动态库不会被 wheel 带上，缺了它只有下发命令的路径会失败。
+# 在任何 SDK 导入之前补齐，缺失时记一条明确的日志而不是等到接管动作中途才炸。
+_crc_ready, _crc_detail = ensure_crc_libraries()
+if not _crc_ready:
+    logger.warning("Unitree SDK2 CRC 运行时未就绪：%s", _crc_detail)
+else:
+    logger.info("%s", describe_crc_status())
 
 AUDIO_DIR_NAME = "audio"
 
