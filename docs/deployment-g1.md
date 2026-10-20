@@ -35,11 +35,33 @@
 ```bash
 cd robot-gui
 uv sync --directory backend --extra test
+# Unitree SDK2 不是本仓库的依赖，是机器人上的环境级安装。
+# uv sync 会清掉不在 pyproject 里的包，所以要在 sync 之后补装（或用 uv sync --inexact）。
+uv pip install --python backend/.venv/bin/python /usr/local/src/unitree_sdk2_python
 ```
 
 `g1-action-studio` 通过 `backend/pyproject.toml` 的 `tool.uv.sources` 以**显式 path 依赖**
 指向 `references/g1-action-studio`，随仓库分发，不需要单独安装。
 `planning` extra 会装 MuJoCo（几何检测）与 OMPL（衔接段绕行，仅 Linux）。
+
+> **部署时容易被裁掉的一步**：`references/g1-action-studio` 必须在目标机上真实存在。
+> 2026-10-20 实测这台机器人上该目录是空的（部署时被裁剪），导致 `uv sync` 找不到包。
+> 修复方式是把已部署的一份源码拷回去：
+>
+> ```bash
+> mkdir -p references/g1-action-studio
+> cp -r /usr/local/src/g1-action-studio-rebuild-26e4f4c/src \
+>       /usr/local/src/g1-action-studio-rebuild-26e4f4c/examples \
+>       /usr/local/src/g1-action-studio-rebuild-26e4f4c/pyproject.toml \
+>       references/g1-action-studio/
+> ```
+
+`uv` 通常不在 PATH 里，用绝对路径：
+
+```bash
+export PATH=$HOME/.local/bin:$PATH
+uv --version    # 0.13.1 aarch64
+```
 
 ### 2.3 配置
 
@@ -126,6 +148,30 @@ systemctl show -p MainPID -p ExecStart unitree-g1.service robot-g1.service
 2. 本工作台发布时，内置运控会不会同时下发同一批关节；
 3. 结论不明确就不要开 `ROBOT_GUI_CONTROLS_ENABLED=1`。
 
+### 4.1 现场实测结果（2026-10-20，`.165`）
+
+只读调查已经在这台机器人上跑过，结论如下：
+
+| 观测项 | 结果 |
+|---|---|
+| `unitree-g1.service` | `unitree_g1 eth0 29`，**开机自启**，一直在跑 |
+| `rt/arm_sdk` 实际流量（15 秒被动订阅） | **0 条 LowCmd**（同期 `rt/lowstate` 15740 条） |
+| FSM（开机后） | 先读到 **4**，随后机器人自行切到 **501**（`CheckMode` 返回 `{'name': 'ai'}`） |
+| `mode_machine` | **5**（29DoF，符合本工作台要求） |
+| 躯干 IMU rpy | [0.016, 0.009, -0.004]，直立 |
+| 机器人当前姿态下 9 段动作的规划与避碰 | **9/9 通过** |
+
+**关键结论**：DDS 上 `rt/arm_sdk` 有多个发布端点，但**实际流量为 0** ——
+`unitree_g1` 服务在 FSM 501 下并不占用这条通道，它只在自己的状态需要驱动腰/臂时才发。
+端点数不等于流量，必须以被动观测为准。
+
+FSM 4 与 501 之间的切换是机器人自己完成的（`MotionSwitcherClient.Init()` 只注册 RPC
+接口，不切模式），本工作台的遥测适配器只用 `LocoClient.GetFsmId()` 只读查询，
+**不会改变机器人模式**。
+
+因此在 FSM 501 下启动本工作台的上肢回放，与内置运控不存在通道冲突。
+仍需现场用遥控器值守，因为后端目前不做整机失衡监测。
+
 ---
 
 ## 5. 首次上机操作清单
@@ -181,4 +227,7 @@ systemctl show -p MainPID -p ExecStart unitree-g1.service robot-g1.service
 | 后端单元与接口测试 | 动作库、控制前置检查、音频端口、HTTP 接口 | `pytest` 24 项通过 |
 | 前端测试 | 遥测展示、动作列表、禁用态 | `vitest` 11 项通过 |
 | 离线规划与避碰 | 课程包 9 段动作整条样条限位 + 自碰撞 | 9/9 通过 |
+| 真机部署 | `.165` 上后端启动、遥测连通、动作库加载 | 已完成，5 个遥测源全 fresh |
+| 真机姿态下的规划预演 | 以机器人实时姿态为基线 | 9/9 通过 |
+| 控制权只读调查 | `rt/arm_sdk` 实际流量、FSM、模式 | 已完成，FSM 501、arm_sdk 流量 0 |
 | 实机验收 | G1 真机接管、播放、返回、交还 | **未做**，需受监督现场执行 |
