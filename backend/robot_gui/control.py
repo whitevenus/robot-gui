@@ -19,6 +19,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from g1_action_studio.model import ArmModel
 from g1_action_studio.motion import Action, StartPose
 from g1_action_studio.planner import plan_sequence
@@ -26,6 +28,7 @@ from g1_action_studio.robot import RobotSession
 
 from .actions import ActionStore, ActionStoreError
 from .audio import G1AudioPort
+from .gravity import GravityFeedforward, install_gravity_command_builder
 
 # 与 g1-action-studio 的示例增益一致：保持阶段 kp/kd = 60/1.5。
 DEFAULT_GAINS: dict[str, dict[str, float]] = {
@@ -79,11 +82,13 @@ class ControlService:
         telemetry: Any,
         action_store: ActionStore,
         audio_port: G1AudioPort | None = None,
+        feedforward: GravityFeedforward | None = None,
     ) -> None:
         self._settings = settings
         self._telemetry = telemetry
         self._store = action_store
         self._audio = audio_port
+        self._feedforward = feedforward
         # 必须是可重入锁：release() 会在持锁状态下调用 state()。
         self._lock = threading.RLock()
         self._cancel = threading.Event()
@@ -93,6 +98,8 @@ class ControlService:
         self._error_code = ""
         self._worker: threading.Thread | None = None
         self._trajectory_duration = 0.0
+        if feedforward is not None:
+            install_gravity_command_builder(feedforward)
 
     # ---- 状态 ----
 
@@ -106,6 +113,7 @@ class ControlService:
                 "available": self._settings.enabled,
                 "trajectory_duration_s": round(self._trajectory_duration, 3),
                 "audio_playing": bool(self._audio.playing) if self._audio else False,
+                "gravity_compensation": self._feedforward is not None,
             }
 
     def _set_phase(self, phase: ControlPhase, message: str = "", error_code: str = "") -> None:
@@ -208,6 +216,10 @@ class ControlService:
                 cancel,
             ) as session:
                 start: StartPose = session.start_pose
+                if self._feedforward is not None:
+                    # 腿部姿态取会话开始时的实测值：上肢动作的几秒内腿基本不动，
+                    # 而腰关节的重力力矩对腿部姿态很敏感（直腿 vs 蹲姿差 3.5 Nm）。
+                    self._feedforward.bind_legs(np.asarray(start.leg_q, dtype=float))
                 self._set_phase(ControlPhase.PLANNING, "规划轨迹并做限位与避碰检查")
                 model = ArmModel(start.leg_q)
                 trajectory = plan_sequence(
@@ -258,6 +270,26 @@ class ControlService:
         thread = threading.Thread(target=worker, name="robot-gui-audio", daemon=True)
         thread.start()
         return thread
+
+
+def measured_pose_provider(hub: Any):
+    """把遥测快照适配成重力前馈要的 (腿部 12 维, 上肢 17 维) 实测关节角。"""
+    from g1_action_studio.model import LEG_JOINTS, UPPER_JOINTS
+
+    def provider() -> tuple[np.ndarray, np.ndarray] | None:
+        angles = hub.latest_joint_angles()
+        if not angles:
+            return None
+        try:
+            leg = np.array([angles[name.replace("_joint", "")] for name in LEG_JOINTS])
+            upper = np.array([angles[name.replace("_joint", "")] for name in UPPER_JOINTS])
+        except KeyError:
+            return None
+        if not (np.isfinite(leg).all() and np.isfinite(upper).all()):
+            return None
+        return leg, upper
+
+    return provider
 
 
 def load_gains(path: Path | None) -> dict[str, dict[str, float]] | None:

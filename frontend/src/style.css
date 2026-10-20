@@ -166,6 +166,12 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+.action-flags {
+  margin: 10px 0 0;
+  color: #667085;
+  font-size: 12px;
+}
+
 .action-cell {
   display: flex;
   align-items: center;

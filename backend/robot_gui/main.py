@@ -15,7 +15,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from .actions import ActionStore, ActionStoreError
 from .adapters import TelemetryAdapter, UnitreeSdkTelemetryAdapter
 from .audio import AudioClientFactory, G1AudioPort
-from .control import ControlError, ControlService, ControlSettings, load_gains
+from .control import (
+    ControlError,
+    ControlService,
+    ControlSettings,
+    load_gains,
+    measured_pose_provider,
+)
+from .gravity import GravityFeedforward, default_model_path
 from .sdk_runtime import describe_crc_status, ensure_crc_libraries
 from .telemetry import TelemetryHub
 
@@ -48,6 +55,7 @@ class RuntimeSettings:
     replay_speed: float = 1.0
     audio_app_name: str = "robot-gui"
     audio_enabled: bool = False
+    gravity_compensation: bool = True
 
     @classmethod
     def from_env(cls) -> RuntimeSettings:
@@ -80,6 +88,10 @@ class RuntimeSettings:
             audio_app_name=os.getenv("ROBOT_GUI_AUDIO_APP", "robot-gui"),
             audio_enabled=os.getenv(
                 "ROBOT_GUI_AUDIO_ENABLED", "false"
+            ).strip().lower()
+            in {"1", "true", "yes", "on"},
+            gravity_compensation=os.getenv(
+                "ROBOT_GUI_GRAVITY_COMPENSATION", "true"
             ).strip().lower()
             in {"1", "true", "yes", "on"},
         )
@@ -143,6 +155,11 @@ def create_app(
         if audio_source is not None
         else None
     )
+    feedforward = (
+        GravityFeedforward(default_model_path(), measured_pose_provider(hub))
+        if runtime_settings.gravity_compensation
+        else None
+    )
     control = ControlService(
         settings=ControlSettings(
             interface=runtime_settings.dds_interface or "",
@@ -155,6 +172,7 @@ def create_app(
         telemetry=hub,
         action_store=store,
         audio_port=audio_port,
+        feedforward=feedforward,
     )
 
     def snapshot() -> dict[str, Any]:
@@ -286,10 +304,11 @@ def create_app(
         if not isinstance(action, str) or not action:
             raise _error("action_required", "缺少要回放的动作名 action。", status=400)
         confirmed = payload.get("confirmed") is True
-        audio = payload.get("audio")
-        audio_pcm: bytes | None = None
-        if isinstance(audio, str) and audio:
-            audio_pcm = _read_audio(store, audio)
+        requested = payload.get("audio")
+        explicit = isinstance(requested, str) and bool(requested)
+        # 未显式指定语音时，自动用与动作同名的 PCM，让讲解和手势一起播。
+        audio_name = requested if explicit else action
+        audio_pcm = _read_audio(store, audio_name, required=explicit)
         try:
             return control.request_replay(
                 action, confirmed=confirmed, audio_pcm=audio_pcm
@@ -314,14 +333,22 @@ def create_app(
     return app
 
 
-def _read_audio(store: ActionStore, name: str) -> bytes:
-    """从动作库目录的 audio/ 子目录取同名 PCM（16 kHz 单声道 16 bit）。"""
+def _read_audio(store: ActionStore, name: str, required: bool = False) -> bytes | None:
+    """从动作库目录的 audio/ 子目录取同名 PCM（16 kHz 单声道 16 bit）。
+
+    未显式指定语音时是「尽力而为」：找不到就安静地不播语音，而不是让回放失败。
+    显式指定了却找不到才算错误。
+    """
     directory = store.data_dir
     if directory is None:
-        raise _error("action_store_not_configured", "未配置 ROBOT_GUI_DATA_DIR。", status=503)
+        if required:
+            raise _error("action_store_not_configured", "未配置 ROBOT_GUI_DATA_DIR。", status=503)
+        return None
     path = directory / AUDIO_DIR_NAME / f"{name}.pcm"
     if not path.is_file():
-        raise _error("audio_not_found", f"找不到音频 {name}.pcm。", status=404)
+        if required:
+            raise _error("audio_not_found", f"找不到音频 {name}.pcm。", status=404)
+        return None
     return path.read_bytes()
 
 

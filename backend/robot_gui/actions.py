@@ -18,6 +18,7 @@ from g1_action_studio.motion import Action, load_action
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SOURCE_EXTRA = "robot_gui"
+AUDIO_DIR_NAME = "audio"
 
 
 class ActionStoreError(RuntimeError):
@@ -35,6 +36,7 @@ class ActionSummary:
     frames: int
     duration_s: float
     source: str
+    has_audio: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -43,6 +45,7 @@ class ActionSummary:
             "frames": self.frames,
             "duration_s": self.duration_s,
             "source": self.source,
+            "has_audio": self.has_audio,
         }
 
 
@@ -100,7 +103,14 @@ class ActionStore:
             frames=len(frames),
             duration_s=round(float(times[-1] - times[0]), 3),
             source=source if isinstance(source, str) else SOURCE_EXTRA,
+            has_audio=self.has_audio(path.stem),
         )
+
+    def has_audio(self, name: str) -> bool:
+        """动作库里是否配有同名语音（<name>.pcm，16 kHz 单声道 16 bit）。"""
+        if self._data_dir is None:
+            return False
+        return (self._data_dir / AUDIO_DIR_NAME / f"{name}.pcm").is_file()
 
     def _validate(self, name: str, payload: bytes) -> Action:
         """用 g1-action-studio 的加载器做权威校验；它要求文件路径，这里走临时文件。"""
@@ -131,6 +141,7 @@ class ActionStore:
             frames=len(action.t),
             duration_s=round(float(action.t[-1] - action.t[0]), 3),
             source=SOURCE_EXTRA,
+            has_audio=self.has_audio(name),
         )
 
     def export_action(self, name: str) -> bytes:

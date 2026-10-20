@@ -262,6 +262,62 @@ def test_control_endpoints_report_refusals(tmp_path: Path) -> None:
         assert refused.json()["detail"]["code"] == "capability_disabled"
 
 
+def test_action_summary_reports_matching_audio(tmp_path: Path) -> None:
+    audio_dir = tmp_path / "audio"
+    audio_dir.mkdir()
+    (audio_dir / "with_audio.pcm").write_bytes(b"\x00\x00" * 16)
+
+    with TestClient(real_test_app(tmp_path)) as client:
+        client.post(
+            "/api/v1/actions/import",
+            json={"name": "with_audio", "action": sample_action()},
+        )
+        client.post(
+            "/api/v1/actions/import",
+            json={"name": "silent", "action": sample_action()},
+        )
+        actions = {item["name"]: item for item in client.get("/api/v1/actions").json()["actions"]}
+
+    assert actions["with_audio"]["has_audio"] is True
+    assert actions["silent"]["has_audio"] is False
+
+
+def test_replay_auto_picks_matching_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未显式指定语音时，后端应自动用同名 PCM，让讲解和手势一起播。"""
+    audio_dir = tmp_path / "audio"
+    audio_dir.mkdir()
+    pcm = b"\x11\x22" * 64
+    (audio_dir / "demo.pcm").write_bytes(pcm)
+
+    captured: dict[str, object] = {}
+
+    def recording_request_replay(self, action, *, confirmed, audio_pcm=None):
+        captured["action"] = action
+        captured["confirmed"] = confirmed
+        captured["audio"] = audio_pcm
+        return self.state()
+
+    app = real_test_app(tmp_path)
+    monkeypatch.setattr(
+        type(app.state.control), "request_replay", recording_request_replay
+    )
+
+    with TestClient(app) as client:
+        client.post(
+            "/api/v1/actions/import",
+            json={"name": "demo", "action": sample_action()},
+        )
+        response = client.post(
+            "/api/v1/control/replay", json={"action": "demo", "confirmed": True}
+        )
+
+    assert response.status_code == 200
+    assert captured["action"] == "demo"
+    assert captured["audio"] == pcm
+
+
 def test_telemetry_snapshot_reports_controls_capability(tmp_path: Path) -> None:
     with TestClient(real_test_app(tmp_path, controls_enabled=True)) as client:
         snapshot = client.get("/api/v1/status").json()

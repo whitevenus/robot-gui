@@ -6,6 +6,7 @@ interface ActionSummary {
   frames: number;
   duration_s: number;
   source: string;
+  has_audio: boolean;
 }
 
 interface ControlState {
@@ -16,6 +17,7 @@ interface ControlState {
   available: boolean;
   trajectory_duration_s: number;
   audio_playing: boolean;
+  gravity_compensation: boolean;
 }
 
 const PHASE_LABELS: Record<string, string> = {
@@ -132,7 +134,7 @@ export function ActionWorkbench() {
     }
   }
 
-  async function runReplay(name: string) {
+  async function runReplay(name: string, withAudio: boolean) {
     if (
       !window.confirm(
         `即将在真机上回放 ${name}。请确认现场安全、机器人处于允许的 FSM 模式，且随时可以按停止。`,
@@ -146,7 +148,11 @@ export function ActionWorkbench() {
       const response = await fetch("/api/v1/control/replay", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: name, confirmed: true }),
+        body: JSON.stringify({
+          action: name,
+          confirmed: true,
+          ...(withAudio ? { audio: name } : {}),
+        }),
       });
       if (!response.ok) {
         setMessage(await readError(response));
@@ -195,6 +201,14 @@ export function ActionWorkbench() {
       {state?.phase === "fault" && state.error_code && (
         <p className="source-error">控制会话失败：{state.error_code} {state.message}</p>
       )}
+      {state && (
+        <p className="action-flags">
+          重力补偿：{state.gravity_compensation ? "开" : "关"}
+          {state.gravity_compensation
+            ? "（上肢力矩按实测姿态前馈，抵消 PD 扛重力造成的下垂）"
+            : "（未开启，上肢前伸会明显下垂）"}
+        </p>
+      )}
       {message && <p className="action-message">{message}</p>}
 
       <div className="table-scroll">
@@ -206,6 +220,7 @@ export function ActionWorkbench() {
               <th>帧数</th>
               <th>时长 (s)</th>
               <th>来源</th>
+              <th>语音</th>
               <th>操作</th>
             </tr>
           </thead>
@@ -217,11 +232,12 @@ export function ActionWorkbench() {
                 <td>{action.frames}</td>
                 <td>{action.duration_s.toFixed(2)}</td>
                 <td>{action.source}</td>
+                <td>{action.has_audio ? "有" : "无"}</td>
                 <td className="action-cell">
                   <button
                     type="button"
                     disabled={!available || busyControl || busy}
-                    onClick={() => void runReplay(action.name)}
+                    onClick={() => void runReplay(action.name, action.has_audio)}
                   >
                     回放
                   </button>
@@ -288,7 +304,10 @@ export function ActionWorkbench() {
         <button
           type="button"
           disabled={!available || busyControl || busy || !selected}
-          onClick={() => void runReplay(selected)}
+          onClick={() => {
+            const target = actions.find((item) => item.name === selected);
+            void runReplay(selected, target?.has_audio ?? false);
+          }}
         >
           确认并回放
         </button>

@@ -67,6 +67,28 @@ class TelemetryHub:
         with self._lock:
             self._samples[source] = sample
 
+    def latest_joint_angles(self) -> dict[str, float] | None:
+        """最近一次 LowState 的关节角，按产品 schema 的关节名索引。
+
+        给控制回路用：重力前馈每个控制周期都要读一次，不能走完整的 snapshot 构造。
+        """
+        with self._lock:
+            sample = self._samples.get("low_state")
+            if sample is None or sample.error or not sample.data:
+                return None
+            joints = sample.data.get("joints")
+        if not isinstance(joints, list):
+            return None
+        angles: dict[str, float] = {}
+        for item in joints:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            value = item.get("q_rad")
+            if isinstance(name, str) and isinstance(value, (int, float)):
+                angles[name] = float(value)
+        return angles or None
+
     def snapshot(
         self,
         mode: str,
