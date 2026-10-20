@@ -13,7 +13,9 @@
 """
 from __future__ import annotations
 
+import logging
 import threading
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -27,8 +29,10 @@ from g1_action_studio.planner import plan_sequence
 from g1_action_studio.robot import RobotSession
 
 from .actions import ActionStore, ActionStoreError
-from .audio import G1AudioPort
+from .audio import G1AudioPort, pcm_duration_s
 from .gravity import GravityFeedforward, install_gravity_command_builder
+
+logger = logging.getLogger(__name__)
 
 # 与 g1-action-studio 的示例增益一致：保持阶段 kp/kd = 60/1.5。
 DEFAULT_GAINS: dict[str, dict[str, float]] = {
@@ -63,6 +67,8 @@ class ControlSettings:
     fsm_whitelist: tuple[int, ...]
     transition_seconds: float = 2.0
     replay_speed: float = 1.0
+    lower_body_drift_deg: float = 5.0
+    hold_soak_s: float = 1.5
     gains: dict[str, dict[str, float]] | None = None
 
     def validate(self) -> None:
@@ -70,6 +76,116 @@ class ControlSettings:
             raise ValueError("transition-seconds must be positive")
         if not 0 < self.replay_speed <= 2.0:
             raise ValueError("replay-speed must be in (0, 2]")
+
+
+class TrackingMonitor:
+    """逐关节跟踪误差监视。
+
+    上肢"下垂"有两种完全不同的原因，动作本身低垂，或者关节没跟上目标。
+    这里在回放期间同时记录命令目标角与实测角，按关节给出最大偏差和均值，
+    一次回放就能分辨是哪一种，也能看出哪些槽位根本没被响应
+    （例如腰被锁住时，waist_* 的目标在变而实测不动）。
+    """
+
+    def __init__(self, joint_names: tuple[str, ...]) -> None:
+        self._names = joint_names
+        self._max = np.zeros(len(joint_names))
+        self._sum = np.zeros(len(joint_names))
+        self._count = 0
+        self._last_target = np.zeros(len(joint_names))
+        self._last_measured = np.zeros(len(joint_names))
+
+    def update(self, target: np.ndarray, measured: np.ndarray | None) -> None:
+        if measured is None:
+            return
+        error = np.abs(np.asarray(target, dtype=float) - np.asarray(measured, dtype=float))
+        self._max = np.maximum(self._max, error)
+        self._sum += error
+        self._count += 1
+        self._last_target = np.asarray(target, dtype=float)
+        self._last_measured = np.asarray(measured, dtype=float)
+
+    def report(self) -> dict[str, Any]:
+        if self._count == 0:
+            return {}
+        return {
+            "samples": self._count,
+            "joints": {
+                name: {
+                    "max_error_rad": round(float(self._max[index]), 4),
+                    "mean_error_rad": round(float(self._sum[index] / self._count), 4),
+                    "target_rad": round(float(self._last_target[index]), 4),
+                    "measured_rad": round(float(self._last_measured[index]), 4),
+                }
+                for index, name in enumerate(self._names)
+            },
+        }
+
+
+class LowerBodyMonitor:
+    """下盘（腿 + 腰）漂移守卫。
+
+    躯干前倾要看**腰 14 的关节角**，不能用 IMU 判：IMU 装在骨盆上，
+    腰倒 23° 时 IMU pitch 只变 2.4°，根本反映不出来。
+
+    参考实现（demo1/fk/g1_arm.py，2026-09-29 实机）的实测结论：
+      完全不锁腰 → 腰 14 最大前倾 +28.5°，膝偏移 46°，腿来回摆
+      锁"实测角"（软锁，目标跟着测量走，位置误差恒 0）→ 腰倒到 ~12°
+      锁"定值" + kp=120 → 才真正提供保持直立的回正力矩
+
+    漂移是**延迟**出现的：手臂停住后平衡控制器才慢慢挪腰/腿，约 1 秒量级，
+    而且发生在整条计划跑完之后，只看动作期间的同步检查永远抓不到。
+    """
+
+    def __init__(self, threshold_deg: float = 5.0) -> None:
+        self._threshold = threshold_deg
+        self._baseline: dict[str, float] = {}
+        self._max_drift = 0.0
+        self._max_joint = ""
+        self._waist_pitch_drift = 0.0
+
+    def capture_baseline(self, angles: dict[str, float]) -> None:
+        self._baseline = dict(angles)
+        self._max_drift = 0.0
+        self._max_joint = ""
+        self._waist_pitch_drift = 0.0
+
+    def update(self, angles: dict[str, float]) -> float:
+        if not self._baseline:
+            return 0.0
+        worst = 0.0
+        worst_joint = ""
+        for name, baseline in self._baseline.items():
+            value = angles.get(name)
+            if value is None:
+                continue
+            drift = abs(value - baseline)
+            if drift > worst:
+                worst = drift
+                worst_joint = name
+        drift_deg = float(np.degrees(worst))
+        if drift_deg > self._max_drift:
+            self._max_drift = drift_deg
+            self._max_joint = worst_joint
+        waist = angles.get("waist_pitch")
+        if waist is not None and "waist_pitch" in self._baseline:
+            self._waist_pitch_drift = float(
+                np.degrees(abs(waist - self._baseline["waist_pitch"]))
+            )
+        return drift_deg
+
+    @property
+    def violated(self) -> bool:
+        return self._max_drift > self._threshold
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "threshold_deg": self._threshold,
+            "max_drift_deg": round(self._max_drift, 3),
+            "max_drift_joint": self._max_joint,
+            "waist_pitch_drift_deg": round(self._waist_pitch_drift, 3),
+            "violated": self.violated,
+        }
 
 
 class ControlService:
@@ -98,6 +214,8 @@ class ControlService:
         self._error_code = ""
         self._worker: threading.Thread | None = None
         self._trajectory_duration = 0.0
+        self._tracking: dict[str, Any] = {}
+        self._lower_body: dict[str, Any] = {}
         if feedforward is not None:
             install_gravity_command_builder(feedforward)
 
@@ -114,7 +232,53 @@ class ControlService:
                 "trajectory_duration_s": round(self._trajectory_duration, 3),
                 "audio_playing": bool(self._audio.playing) if self._audio else False,
                 "gravity_compensation": self._feedforward is not None,
+                "tracking": self._tracking,
+                "lower_body": self._lower_body,
             }
+
+    def _measured_upper(self) -> np.ndarray | None:
+        """当前实测的上肢 17 维关节角（studio 顺序：左臂 7 + 右臂 7 + 腰 3）。"""
+        from g1_action_studio.model import UPPER_JOINTS
+
+        angles = self._telemetry.latest_joint_angles()
+        if not angles:
+            return None
+        try:
+            upper = np.array(
+                [angles[name.replace("_joint", "")] for name in UPPER_JOINTS]
+            )
+        except KeyError:
+            return None
+        if not np.isfinite(upper).all():
+            return None
+        return upper
+
+    def _measured_named(self) -> dict[str, float]:
+        return self._telemetry.latest_joint_angles() or {}
+
+    def _monitor_loop(
+        self,
+        trajectory: Any,
+        started: float,
+        monitor: TrackingMonitor,
+        lower: LowerBodyMonitor,
+        cancel: threading.Event,
+        soak_s: float,
+    ) -> None:
+        deadline = started + trajectory.duration + soak_s
+        while not cancel.is_set():
+            elapsed = time.monotonic() - started
+            if elapsed > trajectory.duration:
+                # 动作结束后的沉降期：漂移是延迟出现的，只看动作期间抓不到。
+                lower.update(self._measured_named())
+                if elapsed > deadline:
+                    return
+            else:
+                target, _ = trajectory.sample(elapsed)
+                measured = self._measured_upper()
+                monitor.update(np.asarray(target, dtype=float), measured)
+                lower.update(self._measured_named())
+            cancel.wait(0.02)
 
     def _set_phase(self, phase: ControlPhase, message: str = "", error_code: str = "") -> None:
         with self._lock:
@@ -167,6 +331,7 @@ class ControlService:
         *,
         confirmed: bool,
         audio_pcm: bytes | None = None,
+        audio_text: str | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if self._worker is not None and self._worker.is_alive():
@@ -176,7 +341,7 @@ class ControlService:
         self._set_phase(ControlPhase.PLANNING, f"正在规划 {action_name}")
         worker = threading.Thread(
             target=self._run,
-            args=(action, audio_pcm),
+            args=(action, audio_pcm, audio_text),
             name="robot-gui-control",
             daemon=False,
         )
@@ -204,7 +369,12 @@ class ControlService:
 
     # ---- 执行体 ----
 
-    def _run(self, action: Action, audio_pcm: bytes | None) -> None:
+    def _run(
+        self,
+        action: Action,
+        audio_pcm: bytes | None,
+        audio_text: str | None,
+    ) -> None:
         cancel = self._cancel
         session: RobotSession | None = None
         audio_thread: threading.Thread | None = None
@@ -234,13 +404,42 @@ class ControlService:
                     self._trajectory_duration = float(trajectory.duration)
                 self._set_phase(ControlPhase.ACQUIRING, "接管上肢控制权")
                 session.acquire()
-                if audio_pcm and self._audio is not None:
-                    audio_thread = self._start_audio(audio_pcm, cancel)
+                if (audio_pcm or audio_text) and self._audio is not None:
+                    audio_thread = self._start_audio(audio_pcm, audio_text, cancel)
                 self._set_phase(
                     ControlPhase.PLAYING,
                     f"回放 {action.group}，轨迹 {trajectory.duration:.1f} 秒",
                 )
+                monitor = TrackingMonitor(upper_joint_names())
+                lower = LowerBodyMonitor(self._settings.lower_body_drift_deg)
+                lower.capture_baseline(self._measured_named())
+                monitor_thread = threading.Thread(
+                    target=self._monitor_loop,
+                    args=(
+                        trajectory,
+                        time.monotonic(),
+                        monitor,
+                        lower,
+                        cancel,
+                        self._settings.hold_soak_s,
+                    ),
+                    name="robot-gui-tracking",
+                    daemon=True,
+                )
+                monitor_thread.start()
                 session.play(trajectory)
+                # 沉降期：下盘漂移是延迟出现的，必须等它跑完再判定。
+                monitor_thread.join(timeout=self._settings.hold_soak_s + 2.0)
+                with self._lock:
+                    self._tracking = monitor.report()
+                    self._lower_body = lower.report()
+                if lower.violated:
+                    self._set_phase(
+                        ControlPhase.FAULT,
+                        f"下盘漂移 {lower.report()['max_drift_deg']}° 超过阈值，"
+                        "已交还控制权",
+                        "lower_body_drift",
+                    )
                 if audio_thread is not None:
                     audio_thread.join(timeout=5.0)
                 self._set_phase(ControlPhase.RELEASING, "回放完成，交还控制权")
@@ -258,18 +457,47 @@ class ControlService:
             with self._lock:
                 self._worker = None
 
-    def _start_audio(self, pcm: bytes, cancel: threading.Event) -> threading.Thread:
-        """让讲解语音与动作本体对齐：过渡段结束后再起播。"""
+    def _start_audio(
+        self,
+        pcm: bytes | None,
+        text: str | None,
+        cancel: threading.Event,
+    ) -> threading.Thread:
+        """让讲解语音与动作本体对齐：过渡段结束后再起播。
+
+        优先用课程包原声的 PCM 推流（保真讲师音色）；推流不可用时退回官方 TTS
+        播原文（参考实现 g1-voice-command 在真机上验证过的路径）。
+        """
         assert self._audio is not None
 
         def worker() -> None:
             if cancel.wait(self._settings.transition_seconds):
                 return
-            self._audio.play(pcm, cancel)
+            if pcm:
+                error = self._audio.play(pcm, cancel)
+                if not error:
+                    logger.info("讲解语音播放完成（PCM 推流 %.2f 秒）", pcm_duration_s(pcm))
+                    return
+                logger.warning("PCM 推流失败（%s），改用官方 TTS 播原文", error)
+            if text:
+                error = self._audio.speak(text)
+                if error:
+                    logger.warning("官方 TTS 播报失败：%s", error)
+                else:
+                    logger.info("讲解语音已用官方 TTS 播报（%d 字）", len(text))
+            else:
+                logger.warning("没有可用的讲解语音：既无 PCM 也无原文")
 
         thread = threading.Thread(target=worker, name="robot-gui-audio", daemon=True)
         thread.start()
         return thread
+
+
+def upper_joint_names() -> tuple[str, ...]:
+    """上肢 17 关节名（studio 顺序），给跟踪误差报表用。"""
+    from g1_action_studio.model import UPPER_JOINTS
+
+    return tuple(name.replace("_joint", "") for name in UPPER_JOINTS)
 
 
 def measured_pose_provider(hub: Any):

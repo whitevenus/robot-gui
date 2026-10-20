@@ -20,7 +20,12 @@ SAMPLE_RATE = 16000
 CHANNELS = 1
 BITS_PER_SAMPLE = 16
 BYTES_PER_SECOND = SAMPLE_RATE * CHANNELS * BITS_PER_SAMPLE // 8
-CHUNK_BYTES = 5120  # 160 毫秒
+#: 官方播放服务（g1_audio_client_play_wav_socket.py）是"攒一批字节一次性 PlayStream
+#: 出去"，实测按 1 秒（32000 字节）一批最接近官方行为。太小会频繁打断，太大则
+#: 服务端一次要吃下太多数据。
+CHUNK_BYTES = 32000
+#: 推完最后一批后还要等这么久才 PlayStop：服务端的播放是异步的，立刻停会掐掉尾巴。
+TAIL_SINK_S = 1.5
 
 
 class G1AudioClient(Protocol):
@@ -73,11 +78,17 @@ def validate_pcm(pcm: bytes) -> None:
 class G1AudioPort:
     """把 PCM 推送到 G1 扬声器。"""
 
-    def __init__(self, client: G1AudioClient | AudioClientFactory, app_name: str) -> None:
+    def __init__(
+        self,
+        client: G1AudioClient | AudioClientFactory,
+        app_name: str,
+        speaker_id: int = 0,
+    ) -> None:
         if not app_name:
             raise ValueError("必须指定 app_name")
         self._client_source = client
         self._app_name = app_name
+        self._speaker_id = speaker_id
         self._lock = threading.Lock()
         self._active_stream_id = ""
         self._recovery_unconfirmed = False
@@ -128,10 +139,31 @@ class G1AudioPort:
                 if stop.wait(max(0.0, started + target - monotonic())):
                     self.stop()
                     return "audio.cancelled"
+            # 推完不等于播完：服务端的播放是异步的，立刻 PlayStop 会掐掉尾巴。
+            if stop.wait(TAIL_SINK_S):
+                self.stop()
+                return "audio.cancelled"
             return self._finish_stream()
         except Exception:
             self.stop()
             return "audio.sdk_exception"
+
+    def speak(self, text: str) -> str:
+        """用官方 TTS 接口播报文本（云端合成）。
+
+        这是参考项目 g1-voice-command 在真机上验证过的路径，与 PlayStream 推流互为
+        备份：推流保留课程包原声，TTS 兜底保证讲解一定有声音。
+        """
+        text = text.strip()
+        if not text:
+            return "audio.empty_text"
+        try:
+            code = self._client.TtsMaker(text, self._speaker_id)
+        except Exception:
+            return "audio.tts_exception"
+        if code != 0:
+            return "audio.tts_rejected"
+        return ""
 
     def stop(self) -> str:
         """停止播放；返回空串表示已确认停止，否则返回稳定错误码。"""

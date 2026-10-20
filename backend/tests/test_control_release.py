@@ -106,6 +106,7 @@ class RecordingAudioClient:
     def __init__(self) -> None:
         self.chunks: list[bytes] = []
         self.stopped = 0
+        self.spoken: list[str] = []
 
     def PlayStream(self, app_name: str, stream_id: str, pcm_data: bytes):
         self.chunks.append(pcm_data)
@@ -115,18 +116,30 @@ class RecordingAudioClient:
         self.stopped += 1
         return 0
 
+    def TtsMaker(self, text: str, speaker_id: int):
+        self.spoken.append(text)
+        return 0
 
-def test_audio_port_streams_5120_byte_chunks_and_stops() -> None:
+
+def test_audio_port_streams_in_chunks_and_stops() -> None:
     client = RecordingAudioClient()
     port = G1AudioPort(client, "robot-gui")
-    pcm = sample_pcm(400)
+    # 3.2 秒的音频，按 1 秒（32000 字节）一批推 4 批
+    pcm = sample_pcm(3200)
 
     assert port.play(pcm, threading.Event()) == ""
-    assert len(client.chunks) == 3
+    assert len(client.chunks) == 4
     assert all(len(chunk) <= CHUNK_BYTES for chunk in client.chunks)
     assert b"".join(client.chunks) == pcm
     assert client.stopped == 1
     assert port.playing is False
+
+
+def test_audio_port_falls_back_to_tts_for_text() -> None:
+    client = RecordingAudioClient()
+    port = G1AudioPort(client, "robot-gui")
+    assert port.speak("同学们好") == ""
+    assert client.spoken == ["同学们好"]
 
 
 def test_audio_port_rejects_odd_length_and_double_play() -> None:
@@ -293,10 +306,11 @@ def test_replay_auto_picks_matching_audio(
 
     captured: dict[str, object] = {}
 
-    def recording_request_replay(self, action, *, confirmed, audio_pcm=None):
+    def recording_request_replay(self, action, *, confirmed, audio_pcm=None, audio_text=None):
         captured["action"] = action
         captured["confirmed"] = confirmed
         captured["audio"] = audio_pcm
+        captured["text"] = audio_text
         return self.state()
 
     app = real_test_app(tmp_path)

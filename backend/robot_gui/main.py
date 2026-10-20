@@ -37,6 +37,7 @@ else:
     logger.info("%s", describe_crc_status())
 
 AUDIO_DIR_NAME = "audio"
+TEXT_DIR_NAME = "text"
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,8 @@ class RuntimeSettings:
     audio_app_name: str = "robot-gui"
     audio_enabled: bool = False
     gravity_compensation: bool = True
+    lower_body_drift_deg: float = 5.0
+    hold_soak_s: float = 1.5
 
     @classmethod
     def from_env(cls) -> RuntimeSettings:
@@ -94,6 +97,8 @@ class RuntimeSettings:
                 "ROBOT_GUI_GRAVITY_COMPENSATION", "true"
             ).strip().lower()
             in {"1", "true", "yes", "on"},
+            lower_body_drift_deg=float(os.getenv("ROBOT_GUI_LOWER_BODY_DRIFT_DEG", "5")),
+            hold_soak_s=float(os.getenv("ROBOT_GUI_HOLD_SOAK_S", "1.5")),
         )
 
     def validate(self) -> None:
@@ -167,6 +172,8 @@ def create_app(
             fsm_whitelist=runtime_settings.fsm_whitelist,
             transition_seconds=runtime_settings.transition_seconds,
             replay_speed=runtime_settings.replay_speed,
+            lower_body_drift_deg=runtime_settings.lower_body_drift_deg,
+            hold_soak_s=runtime_settings.hold_soak_s,
             gains=load_gains(runtime_settings.gains_path),
         ),
         telemetry=hub,
@@ -309,9 +316,13 @@ def create_app(
         # 未显式指定语音时，自动用与动作同名的 PCM，让讲解和手势一起播。
         audio_name = requested if explicit else action
         audio_pcm = _read_audio(store, audio_name, required=explicit)
+        audio_text = _read_text(store, audio_name) if explicit or audio_pcm is None else None
         try:
             return control.request_replay(
-                action, confirmed=confirmed, audio_pcm=audio_pcm
+                action,
+                confirmed=confirmed,
+                audio_pcm=audio_pcm,
+                audio_text=audio_text,
             )
         except ControlError as error:
             raise _error(error.code, str(error)) from error
@@ -331,6 +342,17 @@ def create_app(
             return
 
     return app
+
+
+def _read_text(store: ActionStore, name: str) -> str | None:
+    """从动作库目录的 text/ 子目录取同名讲解原文，供官方 TTS 兜底播报。"""
+    directory = store.data_dir
+    if directory is None:
+        return None
+    path = directory / TEXT_DIR_NAME / f"{name}.txt"
+    if not path.is_file():
+        return None
+    return path.read_text(encoding="utf-8").strip() or None
 
 
 def _read_audio(store: ActionStore, name: str, required: bool = False) -> bytes | None:

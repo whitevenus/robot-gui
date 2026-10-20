@@ -17,6 +17,9 @@ SOURCE_THRESHOLDS_MS = {
     "fsm": (1000, 3000),
 }
 
+#: SDK 槽位 → 产品 schema 关节名。适配器发布的是槽位，关节名在这里还原。
+_JOINT_NAME_BY_SLOT = {joint.sdk_slot: joint.name for joint in G1_29DOF_JOINTS}
+
 
 @dataclass(frozen=True)
 class SourceSample:
@@ -71,6 +74,7 @@ class TelemetryHub:
         """最近一次 LowState 的关节角，按产品 schema 的关节名索引。
 
         给控制回路用：重力前馈每个控制周期都要读一次，不能走完整的 snapshot 构造。
+        注意适配器发布的是 sdk_slot，关节名要在这里按产品 schema 映射出来。
         """
         with self._lock:
             sample = self._samples.get("low_state")
@@ -83,9 +87,12 @@ class TelemetryHub:
         for item in joints:
             if not isinstance(item, dict):
                 continue
-            name = item.get("name")
+            slot = item.get("sdk_slot")
             value = item.get("q_rad")
-            if isinstance(name, str) and isinstance(value, (int, float)):
+            if not isinstance(slot, int) or not isinstance(value, (int, float)):
+                continue
+            name = _JOINT_NAME_BY_SLOT.get(slot)
+            if name is not None:
                 angles[name] = float(value)
         return angles or None
 

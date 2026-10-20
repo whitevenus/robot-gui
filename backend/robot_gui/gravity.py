@@ -144,6 +144,9 @@ def install_gravity_command_builder(feedforward: GravityFeedforward | None) -> N
         tau = feedforward.torques(q) if feedforward is not None else None
         for index, slot in enumerate(UPPER_SLOTS):
             motor = command.motor_cmd[slot]
+            # mode=1 表示使能该电机（SDK 文档：0=Disable / 1=Enable）。
+            # 参考实现 demo1/fk/g1_arm.py 每次写指令都带 mode，缺了它电机是不使能的。
+            motor.mode = 1
             motor.q = float(q[index])
             motor.dq = float(dq[index])
             motor.kp = float(kp[index])
