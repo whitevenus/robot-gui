@@ -48,6 +48,10 @@ def main() -> int:
     _bootstrap_sdk()
 
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+    from unitree_sdk2py.g1.loco.g1_loco_api import (
+        ROBOT_API_ID_LOCO_GET_FSM_ID,
+        ROBOT_API_ID_LOCO_GET_FSM_MODE,
+    )
     from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
 
     ChannelFactoryInitialize(0, interface)
@@ -55,8 +59,16 @@ def main() -> int:
     client.SetTimeout(5.0)
     client.Init()
 
-    code, fsm_id = client.GetFsmId()
-    mode_code, mode_data = client._Call(7002, "{}")  # noqa: SLF001 - SDK 没暴露这个接口
+    # 走底层的通用 RPC（7001/7002），不依赖 LocoClient 的 GetFsmId/GetFsmMode 方法——
+    # 机器人上 /home/unitree/Program 里那份 SDK 比后端 venv 里的旧，没有那两个方法。
+    id_code, id_data = client._Call(ROBOT_API_ID_LOCO_GET_FSM_ID, "{}")  # noqa: SLF001
+    mode_code, mode_data = client._Call(ROBOT_API_ID_LOCO_GET_FSM_MODE, "{}")  # noqa: SLF001
+    fsm_id = None
+    if id_code == 0 and id_data:
+        try:
+            fsm_id = json.loads(id_data).get("data")
+        except (TypeError, ValueError):
+            fsm_id = None
     fsm_mode = None
     if mode_code == 0 and mode_data:
         try:
@@ -79,8 +91,8 @@ def main() -> int:
     state = "静态（允许切换）" if fsm_mode == 0 else "运动（固件会拒绝大部分切换）"
     print(f"fsm_id   = {fsm_id}  ({label})")
     print(f"fsm_mode = {fsm_mode}  ({state})")
-    if code != 0:
-        print(f"读 FSM 失败，错误码 {code}")
+    if id_code != 0 or mode_code != 0:
+        print(f"读 FSM 失败，错误码 fsm_id={id_code} fsm_mode={mode_code}")
         return 1
     return 0
 

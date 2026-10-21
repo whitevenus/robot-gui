@@ -3,17 +3,28 @@
 robot-gui 部署在机器人本机，直接用 SDK2 的 AudioClient 推流，不需要 SSH 转发
 （robocourse 的 g1_audio_worker.py 是给远端控制端用的桥）。
 
-协议：PlayStream(app_name, stream_id, chunk) 分块推流，PlayStop(app_name) 收尾。
+协议：PlayStream(app_name, stream_id, pcm) **整段一次推完**，PlayStop(app_name) 收尾。
 PCM 必须是 16 kHz / 单声道 / 16 bit。
 
 **只有 PCM 一条路**：不做官方 TTS 兜底。兜底播的是云端合成的另一套音色，和课程包
 对不上；讲不出原声就不出声，比出个错的音色好。
 
-三个真机踩过的坑（2026-10-21）：
+为什么整段一次推（2026-10-21 在 .165 上逐项实测）：
 
-1. **等待必须从"推送完成"起算，不能从整段开始算。** 官方 `play_pcm_stream` 是
-   `PlayStream` 之后 `sleep(该块时长)`；早期版本按"整段播放位置"等待，把第一块
-   的 RPC 往返吃掉了，后面每一块都提前到达，机器人端会拒。
+- 服务端**不挑分块方式**。32000 / 96000 / 5120 字节分块各推一遍，加上整段一次推，
+  共 60 余次调用，返回码**全是 0**；单次整推连 2000000 字节（62 秒）都是
+  `code=0`、往返 0.29 秒。分块没有换来任何好处。
+- 分块唯一的代价是**多几次 RPC**：5 块就是 5 次失败机会，而一旦某块被拒，
+  故障形态是"只播了开头几个字"——正是真机上看到的现象。整段一次推只有 1 次机会，
+  要么整段播出来，要么干脆没声音，不会半句话卡住。
+- 这也是官方 C++ 例程的做法（一次推整个 wav）。
+
+三个真机踩过的坑：
+
+1. **失败不能重推。** 官方《音频灯光服务接口》写明「stream_id 相同为缓存续播，
+   不同则打断播放」：用同一个 stream_id 重推，机器人端会把已播内容**再播一遍**
+   （真机实测：开头几个字之后，同一句重复了一遍）；换新 stream_id 则会打断当前
+   播放、丢掉已播内容。两种都比断在半截更糟，所以如实报错，把选择权交回调用方。
 2. **失败收尾不能置闩锁。** 闩锁原本是"PlayStop 不校验返回码、无法确认流真的停了"
    的保险，但旧实现把它当成了"永久封锁"：任何一次失败（甚至一次用户取消）之后，
    后续所有播放都直接返回 `audio.stop_unconfirmed`，一个字节都不推，机器人上
@@ -28,19 +39,15 @@ import threading
 import time
 from typing import Any, Protocol
 
+from loguru import logger
+
 SAMPLE_RATE = 16000
 CHANNELS = 1
 BITS_PER_SAMPLE = 16
 BYTES_PER_SECOND = SAMPLE_RATE * CHANNELS * BITS_PER_SAMPLE // 8
-#: 官方播放服务（g1_audio_client_play_wav_socket.py）是"攒一批字节一次性 PlayStream
-#: 出去"，实测按 1 秒（32000 字节）一批最接近官方行为。太小会频繁打断，太大则
-#: 服务端一次要吃下太多数据。
-CHUNK_BYTES = 32000
-#: 推完最后一批后还要等这么久才 PlayStop：服务端的播放是异步的，立刻停会掐掉尾巴。
-TAIL_SINK_S = 1.5
-#: 被拒时重试一次的等待时间。机器人端在上一块还没播完时收到新块会拒，
-#: 等半秒通常就够了。
-RETRY_DELAY_S = 0.5
+#: 整段时长之外再多等这么久才 PlayStop：服务端的播放是异步的，等音频时长过去
+#: 之后还需要一点时间让它把尾巴播完，立刻 PlayStop 会掐掉尾音。
+TAIL_SINK_S = 0.3
 
 
 class G1AudioClient(Protocol):
@@ -64,7 +71,7 @@ class AudioClientFactory:
             from unitree_sdk2py.g1.audio.g1_audio_client import AudioClient
 
             client = AudioClient()
-            # 超时给足：PlayStream 要把整块 PCM 传过去，2 秒在 DDS 带宽被占时不够用
+            # 超时给足：整段 PCM 要一次传过去，2 秒在 DDS 带宽被占时不够用
             # （官方例程用的是 10 秒）。
             client.SetTimeout(10.0)
             client.Init()
@@ -126,7 +133,7 @@ class G1AudioPort:
         return bool(self._active_stream_id)
 
     def play(self, pcm: bytes, stop: threading.Event) -> str:
-        """推流播放；返回空串表示完成，否则返回稳定错误码。"""
+        """整段推流播放；返回空串表示完成，否则返回稳定错误码。"""
         try:
             validate_pcm(pcm)
         except AudioError as error:
@@ -139,25 +146,16 @@ class G1AudioPort:
             stream_id = f"{self._app_name}-{int(time.time() * 1000)}"
             self._active_stream_id = stream_id
         try:
-            for offset in range(0, len(pcm), CHUNK_BYTES):
-                if stop.is_set():
-                    self._abort_stream()
-                    return "audio.cancelled"
-                chunk = pcm[offset : offset + CHUNK_BYTES]
-                code = self._push_chunk(stream_id, chunk)
-                if code != 0 and not stop.wait(RETRY_DELAY_S):
-                    # 机器人端在上一块还没播完时收到新块会拒，等一下再试一次。
-                    code = self._push_chunk(stream_id, chunk)
-                if code != 0:
-                    self._abort_stream()
-                    return "audio.stream_rejected"
-                # 等这一块播完再推下一块。**从推送完成起算**——按整段播放位置等待会把
-                # 第一块的 RPC 往返吃掉，后面每一块都提前到达，机器人端会拒。
-                if stop.wait(len(chunk) / BYTES_PER_SECOND):
-                    self._abort_stream()
-                    return "audio.cancelled"
-            # 推完不等于播完：服务端的播放是异步的，立刻 PlayStop 会掐掉尾巴。
-            if stop.wait(TAIL_SINK_S):
+            code = self._push(stream_id, pcm)
+            if code != 0:
+                # **不重推。** 用同一个 stream_id 重推，机器人端会当成缓存续播把已播
+                # 内容再播一遍；换新 stream_id 则会打断当前播放、丢掉已播内容。
+                # 两种都比断在半截更糟，所以如实报错，把选择权交回调用方。
+                logger.warning("音频整段推送被拒，返回码 {}", code)
+                self._abort_stream()
+                return "audio.stream_rejected"
+            # 推完不等于播完：服务端的播放是异步的，等整段时长过去再收尾。
+            if stop.wait(pcm_duration_s(pcm) + TAIL_SINK_S):
                 self._abort_stream()
                 return "audio.cancelled"
             return self._finish_stream()
@@ -165,9 +163,9 @@ class G1AudioPort:
             self._abort_stream()
             return "audio.sdk_exception"
 
-    def _push_chunk(self, stream_id: str, chunk: bytes) -> int:
-        """推一块，返回机器人端的返回码（0 = 接受）。"""
-        reply = self._client.PlayStream(self._app_name, stream_id, chunk)
+    def _push(self, stream_id: str, pcm: bytes) -> int:
+        """整段推送，返回机器人端的返回码（0 = 接受）。"""
+        reply = self._client.PlayStream(self._app_name, stream_id, pcm)
         return reply[0] if isinstance(reply, tuple) else reply
 
     def stop(self) -> str:

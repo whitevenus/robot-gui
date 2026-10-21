@@ -16,7 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from robot_gui.actions import ActionStore, ActionStoreError
-from robot_gui.audio import CHUNK_BYTES, G1AudioPort
+from robot_gui.audio import G1AudioPort
 from robot_gui.control import ControlError, ControlService, ControlSettings
 from robot_gui.main import RuntimeSettings, create_app
 from test_real_telemetry import TelemetryTestAdapter
@@ -119,16 +119,15 @@ class RecordingAudioClient:
         return 0
 
 
-def test_audio_port_streams_in_chunks_and_stops() -> None:
+def test_audio_port_pushes_the_whole_clip_once_and_stops() -> None:
+    """整段一次推完：分块只会把"第 N 块被拒 → 只播开头几个字"的故障面放大。"""
     client = RecordingAudioClient()
     port = G1AudioPort(client, "robot-gui")
-    # 3.2 秒的音频，按 1 秒（32000 字节）一批推 4 批
-    pcm = sample_pcm(3200)
+    pcm = sample_pcm(3200)  # 3.2 秒
 
     assert port.play(pcm, threading.Event()) == ""
-    assert len(client.chunks) == 4
-    assert all(len(chunk) <= CHUNK_BYTES for chunk in client.chunks)
-    assert b"".join(client.chunks) == pcm
+    assert len(client.chunks) == 1
+    assert client.chunks[0] == pcm
     assert client.stopped == 1
     assert port.playing is False
 
@@ -174,12 +173,8 @@ def test_audio_port_uses_a_unique_stream_id_per_playback() -> None:
     assert len(set(unique_client.stream_ids)) == len(unique_client.stream_ids)
 
 
-def test_audio_port_waits_a_full_chunk_duration_between_pushes() -> None:
-    """块间隔必须从**推送完成**起算，不能从整段开始算。
-
-    按整段播放位置等待会把第一块的 RPC 往返吃掉，后面每一块都提前到达，
-    机器人端会拒（2026-10-21 真机实测：第一块播了就没声音）。
-    """
+def test_audio_port_waits_for_the_whole_clip_before_stopping() -> None:
+    """推完不等于播完：服务端的播放是异步的，必须等整段时长过去再 PlayStop。"""
     client = RecordingAudioClient()
     port = G1AudioPort(client, "robot-gui")
 
@@ -192,33 +187,34 @@ def test_audio_port_waits_a_full_chunk_duration_between_pushes() -> None:
 
     client.PlayStream = timed  # type: ignore[method-assign]
 
-    pcm = sample_pcm(400)  # 400 毫秒 = 12800 字节，一块
+    pcm = sample_pcm(400)  # 400 毫秒
     started = time.monotonic()
     assert port.play(pcm, threading.Event()) == ""
     elapsed = time.monotonic() - started
 
     assert len(pushed) == 1
-    # 推完还要等尾音（TAIL_SINK_S），所以总时长至少是块时长 + 尾音。
+    # 总时长至少是音频时长（还要多等尾音）。
     assert elapsed >= len(pcm) / 32000.0
 
 
-def test_audio_port_retries_a_rejected_chunk_once() -> None:
-    """机器人端偶尔会拒第一块（上一块还没播完就收到新块），重试一次应该能过。"""
+def test_audio_port_does_not_retry_a_rejected_push() -> None:
+    """被拒不能重推：同 stream_id 重推会让机器人端把已播内容再播一遍。"""
 
-    class FlakyClient(RecordingAudioClient):
+    class RejectingClient(RecordingAudioClient):
         def __init__(self) -> None:
             super().__init__()
             self.calls = 0
 
         def PlayStream(self, app_name: str, stream_id: str, pcm_data: bytes):
             self.calls += 1
-            if self.calls == 1:
-                return (1, "")
-            return 0
+            return (1, "")
 
-    client = FlakyClient()
+    client = RejectingClient()
     port = G1AudioPort(client, "robot-gui")
-    assert port.play(sample_pcm(200), threading.Event()) == ""
+    assert port.play(sample_pcm(200), threading.Event()) == "audio.stream_rejected"
+    assert client.calls == 1
+    # 失败之后仍然能再播：闩锁只记账，不封锁。
+    assert port.play(sample_pcm(200), threading.Event()) == "audio.stream_rejected"
     assert client.calls == 2
 
 
