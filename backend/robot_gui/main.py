@@ -15,7 +15,7 @@ from loguru import logger
 
 from .actions import ActionStore, ActionStoreError
 from .adapters import TelemetryAdapter, UnitreeSdkTelemetryAdapter
-from .audio import AudioClientFactory, G1AudioPort
+from .audio import AudioPusher, G1AudioPort
 from .control import (
     ControlError,
     ControlService,
@@ -158,7 +158,7 @@ def _error(code: str, message: str, status: int = 409) -> HTTPException:
 def create_app(
     settings: RuntimeSettings | None = None,
     telemetry_adapter: TelemetryAdapter | None = None,
-    audio_client: Any | None = None,
+    audio_pusher: AudioPusher | None = None,
 ) -> FastAPI:
     runtime_settings = settings or RuntimeSettings.from_env()
 
@@ -170,15 +170,9 @@ def create_app(
         secondary_imu_topic=runtime_settings.secondary_imu_topic,
     )
     store = ActionStore(runtime_settings.data_dir)
-    if audio_client is not None:
-        audio_source: Any = audio_client
-    elif runtime_settings.audio_enabled:
-        audio_source = AudioClientFactory()
-    else:
-        audio_source = None
     audio_port = (
-        G1AudioPort(audio_source, runtime_settings.audio_app_name)
-        if audio_source is not None
+        G1AudioPort(runtime_settings.audio_app_name, pusher=audio_pusher)
+        if audio_pusher is not None or runtime_settings.audio_enabled
         else None
     )
     feedforward = (
@@ -239,8 +233,8 @@ def create_app(
             yield
         finally:
             control.release()
-            if isinstance(audio_source, AudioClientFactory):
-                audio_source.close()
+            if audio_port is not None:
+                audio_port.stop()
             try:
                 await asyncio.to_thread(adapter.stop)
             except Exception:  # noqa: BLE001 - 收尾失败只记日志，不阻断退出

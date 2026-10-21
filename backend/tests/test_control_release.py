@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from robot_gui.actions import ActionStore, ActionStoreError
-from robot_gui.audio import G1AudioPort
+from robot_gui.audio import G1AudioPort, WorkerAudioPusher
 from robot_gui.control import ControlError, ControlService, ControlSettings
 from robot_gui.main import RuntimeSettings, create_app
 from test_real_telemetry import TelemetryTestAdapter
@@ -105,30 +104,31 @@ def test_action_store_without_data_dir_fails_explicitly(tmp_path: Path) -> None:
 # ---------------------------------------------------------------- 音频端口
 
 
-class RecordingAudioClient:
-    def __init__(self) -> None:
-        self.chunks: list[bytes] = []
+class FakeAudioPusher:
+    """替身：记录推流调用，模拟子进程的结果。"""
+
+    def __init__(self, error: str = "") -> None:
+        self.error = error
+        self.calls: list[tuple[str, bytes]] = []
         self.stopped = 0
 
-    def PlayStream(self, app_name: str, stream_id: str, pcm_data: bytes):
-        self.chunks.append(pcm_data)
-        return 0
+    def push(self, stream_id: str, pcm: bytes, stop: threading.Event) -> str:
+        self.calls.append((stream_id, pcm))
+        return self.error
 
-    def PlayStop(self, app_name: str):
+    def stop(self) -> None:
         self.stopped += 1
-        return 0
 
 
-def test_audio_port_pushes_the_whole_clip_once_and_stops() -> None:
+def test_audio_port_pushes_the_whole_clip_once() -> None:
     """整段一次推完：分块只会把"第 N 块被拒 → 只播开头几个字"的故障面放大。"""
-    client = RecordingAudioClient()
-    port = G1AudioPort(client, "robot-gui")
+    pusher = FakeAudioPusher()
+    port = G1AudioPort("robot-gui", pusher=pusher)
     pcm = sample_pcm(3200)  # 3.2 秒
 
     assert port.play(pcm, threading.Event()) == ""
-    assert len(client.chunks) == 1
-    assert client.chunks[0] == pcm
-    assert client.stopped == 1
+    assert len(pusher.calls) == 1
+    assert pusher.calls[0][1] == pcm
     assert port.playing is False
 
 
@@ -137,85 +137,88 @@ def test_audio_port_has_no_tts_fallback() -> None:
     assert not hasattr(G1AudioPort, "speak")
 
 
-def test_audio_port_rejects_odd_length_and_double_play() -> None:
-    client = RecordingAudioClient()
-    port = G1AudioPort(client, "robot-gui")
+def test_audio_port_rejects_odd_length() -> None:
+    pusher = FakeAudioPusher()
+    port = G1AudioPort("robot-gui", pusher=pusher)
 
     assert port.play(b"\x00", threading.Event()) == "audio.invalid_pcm_length"
+    assert pusher.calls == []
 
-    blocking = threading.Event()
-    blocking.set()
-    assert port.play(sample_pcm(200), blocking) == "audio.cancelled"
-    # 取消之后**不能**永久失去音频能力：旧实现把「停止未确认」当成了永久封锁，
-    # 一次失败后所有播放都直接返回 stop_unconfirmed，一个字节都不推。
-    # 现在闩锁只记账，stream_id 每次是新时间戳，残留的旧流不会和新流撞上。
-    assert port.play(sample_pcm(200), threading.Event()) == ""
-    assert client.chunks, "取消之后仍然应该能正常推流"
+
+def test_audio_port_refuses_a_second_playback_while_playing() -> None:
+    """同一时刻只允许一段讲解在放。"""
+
+    class BlockingPusher(FakeAudioPusher):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def push(self, stream_id: str, pcm: bytes, stop: threading.Event) -> str:
+            self.calls.append((stream_id, pcm))
+            self.entered.set()
+            self.release.wait(5.0)
+            return self.error
+
+    pusher = BlockingPusher()
+    port = G1AudioPort("robot-gui", pusher=pusher)
+    result: list[str] = []
+
+    def play() -> None:
+        result.append(port.play(sample_pcm(200), threading.Event()))
+
+    thread = threading.Thread(target=play)
+    thread.start()
+    assert pusher.entered.wait(5.0)
+
+    assert port.play(sample_pcm(200), threading.Event()) == "audio.already_playing"
+
+    pusher.release.set()
+    thread.join(timeout=5.0)
+    assert result == [""]
 
 
 def test_audio_port_uses_a_unique_stream_id_per_playback() -> None:
     """stream_id 必须全局唯一，否则进程重启后会撞上机器人端残留的旧流。"""
+    pusher = FakeAudioPusher()
+    port = G1AudioPort("robot-gui", pusher=pusher)
+    port.play(sample_pcm(200), threading.Event())
+    port.play(sample_pcm(200), threading.Event())
 
-    class StreamIdClient(RecordingAudioClient):
-        def __init__(self) -> None:
-            super().__init__()
-            self.stream_ids: list[str] = []
-
-        def PlayStream(self, app_name: str, stream_id: str, pcm_data: bytes):
-            self.stream_ids.append(stream_id)
-            return super().PlayStream(app_name, stream_id, pcm_data)
-
-    unique_client = StreamIdClient()
-    unique_port = G1AudioPort(unique_client, "robot-gui")
-    unique_port.play(sample_pcm(200), threading.Event())
-    unique_port.play(sample_pcm(200), threading.Event())
-
-    assert len(set(unique_client.stream_ids)) == len(unique_client.stream_ids)
-
-
-def test_audio_port_waits_for_the_whole_clip_before_stopping() -> None:
-    """推完不等于播完：服务端的播放是异步的，必须等整段时长过去再 PlayStop。"""
-    client = RecordingAudioClient()
-    port = G1AudioPort(client, "robot-gui")
-
-    pushed: list[float] = []
-    original = client.PlayStream
-
-    def timed(app_name: str, stream_id: str, pcm_data: bytes):
-        pushed.append(time.monotonic())
-        return original(app_name, stream_id, pcm_data)
-
-    client.PlayStream = timed  # type: ignore[method-assign]
-
-    pcm = sample_pcm(400)  # 400 毫秒
-    started = time.monotonic()
-    assert port.play(pcm, threading.Event()) == ""
-    elapsed = time.monotonic() - started
-
-    assert len(pushed) == 1
-    # 总时长至少是音频时长（还要多等尾音）。
-    assert elapsed >= len(pcm) / 32000.0
+    stream_ids = [stream_id for stream_id, _ in pusher.calls]
+    assert len(set(stream_ids)) == len(stream_ids)
 
 
 def test_audio_port_does_not_retry_a_rejected_push() -> None:
     """被拒不能重推：同 stream_id 重推会让机器人端把已播内容再播一遍。"""
+    pusher = FakeAudioPusher(error="audio.stream_rejected")
+    port = G1AudioPort("robot-gui", pusher=pusher)
 
-    class RejectingClient(RecordingAudioClient):
-        def __init__(self) -> None:
-            super().__init__()
-            self.calls = 0
-
-        def PlayStream(self, app_name: str, stream_id: str, pcm_data: bytes):
-            self.calls += 1
-            return (1, "")
-
-    client = RejectingClient()
-    port = G1AudioPort(client, "robot-gui")
     assert port.play(sample_pcm(200), threading.Event()) == "audio.stream_rejected"
-    assert client.calls == 1
+    assert len(pusher.calls) == 1
     # 失败之后仍然能再播：闩锁只记账，不封锁。
     assert port.play(sample_pcm(200), threading.Event()) == "audio.stream_rejected"
-    assert client.calls == 2
+    assert len(pusher.calls) == 2
+
+
+def test_audio_port_forwards_cancellation() -> None:
+    pusher = FakeAudioPusher(error="audio.cancelled")
+    port = G1AudioPort("robot-gui", pusher=pusher)
+
+    assert port.play(sample_pcm(200), threading.Event()) == "audio.cancelled"
+    assert port.playing is False
+
+
+def test_worker_pusher_runs_the_audio_worker_module() -> None:
+    """推流必须在独立进程里跑：回放期间同进程内的 RPC 回包收不到。"""
+    pusher = WorkerAudioPusher("robot-gui", python_executable="/usr/bin/python3")
+    command = pusher.build_command("robot-gui-123")
+
+    assert command[:3] == ["/usr/bin/python3", "-m", "robot_gui.audio_worker"]
+    assert "--app-name" in command
+    assert "robot-gui" in command
+    assert "--stream-id" in command
+    assert "robot-gui-123" in command
 
 
 # ---------------------------------------------------------------- 控制前置检查
