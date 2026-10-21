@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""单独播放课程包里的讲解语音（不驱动任何关节）。
+"""播放课程包里的讲解语音（不驱动任何关节）。
 
-走的是后端生产代码的同一条推流路径（G1AudioPort），所以听到的结果就是
-回放时讲解的真实效果。用来在不动机器人的前提下验证语音是否完整。
+走的是后端生产代码的同一条推流路径（G1AudioPort → robot_gui.audio_worker 子进程），
+所以听到的结果就是回放时讲解的真实效果。用来在不动机器人的前提下验证语音是否完整。
 
 用法（机器人上）：
-    python3 tools/play_audio.py p1_s2
-    python3 tools/play_audio.py p1_s2 --app-name robot-gui
-    python3 tools/play_audio.py p1_s2 --interface eth0
+    python3 tools/play_audio.py p1_s2          放一段
+    python3 tools/play_audio.py --course        放整套（按 data/course.json 的顺序）
+
+整套走的是**和回放时一样的拼法**：各段讲解按动作在轨迹里的起始时刻拼成一条
+连续的 PCM，段间补静音。段间衔接时长取 ROBOT_GUI_TRANSITION_SECONDS（默认 2 秒）。
 
 只播声音：不发任何控制消息。
 """
@@ -15,6 +17,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 import threading
 from pathlib import Path
@@ -38,28 +42,55 @@ def _bootstrap() -> None:
         raise SystemExit(2) from None
 
 
+def _course_clips(data_dir: Path) -> list[tuple[float, bytes]]:
+    """按课程清单拼出整套语音时间线：(起始秒数, PCM)。"""
+    course = json.loads((data_dir / "course.json").read_text(encoding="utf-8"))
+    transition = float(os.getenv("ROBOT_GUI_TRANSITION_SECONDS", "2.0"))
+    clips: list[tuple[float, bytes]] = []
+    offset = 0.0
+    for name in course["actions"]:
+        body = json.loads((data_dir / f"{name}.json").read_text(encoding="utf-8"))
+        duration = float(body["frames"][-1]["t"])
+        pcm_path = data_dir / "audio" / f"{name}.pcm"
+        if pcm_path.is_file():
+            clips.append((offset, pcm_path.read_bytes()))
+        offset += duration + transition
+    return clips
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="播放课程包里的讲解语音")
-    parser.add_argument("name", help="动作名，语音取 data/audio/<名字>.pcm")
+    parser.add_argument("name", nargs="?", help="动作名，语音取 data/audio/<名字>.pcm")
+    parser.add_argument(
+        "--course", action="store_true", help="放整套（按 data/course.json 的顺序）"
+    )
     parser.add_argument("--app-name", default="robot-gui", help="推流用的应用名")
     parser.add_argument("--interface", default="eth0", help="网卡")
     args = parser.parse_args()
 
+    if not args.course and not args.name:
+        parser.error("要给出动作名，或者用 --course")
+
     _bootstrap()
 
-    from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+    from robot_gui.audio import G1AudioPort, build_timeline
 
-    from robot_gui.audio import AudioClientFactory, G1AudioPort, pcm_duration_s
+    data_dir = Path(os.getenv("ROBOT_GUI_DATA_DIR", str(PROJECT_ROOT / "data")))
+    if args.course:
+        clips = _course_clips(data_dir)
+        pcm = build_timeline(clips)
+        print(f"整套语音 {len(clips)} 段，共 {len(pcm) / 32000:.2f} 秒", flush=True)
+    else:
+        path = data_dir / "audio" / f"{args.name}.pcm"
+        if not path.is_file():
+            print(f"找不到语音文件 {path}", file=sys.stderr)
+            return 1
+        pcm = path.read_bytes()
+        print(f"播放 {path.name}，{len(pcm) / 32000:.2f} 秒", flush=True)
 
-    path = PROJECT_ROOT / "data" / "audio" / f"{args.name}.pcm"
-    if not path.is_file():
-        print(f"找不到语音文件 {path}", file=sys.stderr)
-        return 1
-    pcm = path.read_bytes()
-
-    ChannelFactoryInitialize(0, args.interface)
-    port = G1AudioPort(AudioClientFactory(), args.app_name)
-    print(f"播放 {path.name}，{pcm_duration_s(pcm):.2f} 秒", flush=True)
+    # 推流在独立子进程里做（它自己建 DDS 通道），这里只把网卡传给它。
+    os.environ["ROBOT_GUI_DDS_INTERFACE"] = args.interface
+    port = G1AudioPort(args.app_name)
     error = port.play(pcm, threading.Event())
     if error:
         print(f"播放失败：{error}", file=sys.stderr)

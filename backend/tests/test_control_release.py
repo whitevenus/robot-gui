@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from robot_gui.actions import ActionStore, ActionStoreError
-from robot_gui.audio import G1AudioPort, WorkerAudioPusher
+from robot_gui.audio import G1AudioPort, WorkerAudioPusher, build_timeline
 from robot_gui.control import ControlError, ControlService, ControlSettings
 from robot_gui.main import RuntimeSettings, create_app
 from test_real_telemetry import TelemetryTestAdapter
@@ -221,6 +221,89 @@ def test_worker_pusher_runs_the_audio_worker_module() -> None:
     assert "robot-gui-123" in command
 
 
+def test_build_timeline_pads_silence_between_clips() -> None:
+    """讲解按各段的动作时刻拼成一条：段之间补静音，不能提前也不能重叠。"""
+    clip = b"\x11\x22" * 16  # 32 字节 = 1 毫秒
+    timeline = build_timeline([(0.0, clip), (0.5, clip)])
+
+    # 第二段必须**正好**落在 0.5 秒处（16000 字节）。
+    assert len(timeline) == 16000 + 32
+    assert timeline[:32] == clip
+    assert timeline[32:16000] == b"\x00" * (16000 - 32)
+    assert timeline[16000:] == clip
+
+
+def test_action_store_loads_the_course_manifest(tmp_path: Path) -> None:
+    """一整套的顺序由 course.json 给出，不靠文件名猜。"""
+    (tmp_path / "course.json").write_text(
+        json.dumps({"name": "stage_c", "actions": ["p1_s0", "p2_s1"]}),
+        encoding="utf-8",
+    )
+    course = ActionStore(tmp_path).load_course()
+
+    assert course.name == "stage_c"
+    assert course.actions == ("p1_s0", "p2_s1")
+
+
+def test_action_store_reports_a_missing_course_manifest(tmp_path: Path) -> None:
+    with pytest.raises(ActionStoreError) as error:
+        ActionStore(tmp_path).load_course()
+    assert error.value.code == "course_not_found"
+
+
+def test_replay_accepts_the_whole_course(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """整套播放：按清单顺序把动作一次性交给控制服务，语音各段同名。"""
+    audio_dir = tmp_path / "audio"
+    audio_dir.mkdir()
+    (audio_dir / "demo.pcm").write_bytes(b"\x11\x22" * 64)
+    (audio_dir / "demo2.pcm").write_bytes(b"\x33\x44" * 64)
+    (tmp_path / "course.json").write_text(
+        json.dumps({"name": "stage_c", "actions": ["demo", "demo2"]}),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    def recording_request_replay(self, action_names, *, confirmed, audio_clips=None):
+        captured["actions"] = list(action_names)
+        captured["audio"] = dict(audio_clips or {})
+        return self.state()
+
+    app = real_test_app(tmp_path)
+    monkeypatch.setattr(
+        type(app.state.control), "request_replay", recording_request_replay
+    )
+
+    with TestClient(app) as client:
+        for name in ("demo", "demo2"):
+            client.post(
+                "/api/v1/actions/import",
+                json={"name": name, "action": sample_action()},
+            )
+        response = client.post(
+            "/api/v1/control/replay", json={"course": True, "confirmed": True}
+        )
+
+    assert response.status_code == 200
+    assert captured["actions"] == ["demo", "demo2"]
+    assert captured["audio"] == {
+        "demo": b"\x11\x22" * 64,
+        "demo2": b"\x33\x44" * 64,
+    }
+
+
+def test_actions_endpoint_exposes_the_course(tmp_path: Path) -> None:
+    (tmp_path / "course.json").write_text(
+        json.dumps({"name": "stage_c", "actions": ["demo"]}), encoding="utf-8"
+    )
+    with TestClient(real_test_app(tmp_path)) as client:
+        body = client.get("/api/v1/actions").json()
+
+    assert body["course"] == {"name": "stage_c", "actions": ["demo"]}
+
+
 # ---------------------------------------------------------------- 控制前置检查
 
 
@@ -374,10 +457,10 @@ def test_replay_auto_picks_matching_audio(
 
     captured: dict[str, object] = {}
 
-    def recording_request_replay(self, action, *, confirmed, audio_pcm=None):
-        captured["action"] = action
+    def recording_request_replay(self, action_names, *, confirmed, audio_clips=None):
+        captured["actions"] = list(action_names)
         captured["confirmed"] = confirmed
-        captured["audio"] = audio_pcm
+        captured["audio"] = (audio_clips or {}).get("demo")
         return self.state()
 
     app = real_test_app(tmp_path)
@@ -395,7 +478,7 @@ def test_replay_auto_picks_matching_audio(
         )
 
     assert response.status_code == 200
-    assert captured["action"] == "demo"
+    assert captured["actions"] == ["demo"]
     assert captured["audio"] == pcm
 
 

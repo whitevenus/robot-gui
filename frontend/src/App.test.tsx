@@ -82,7 +82,7 @@ const FSM_MODES = [
 ];
 
 function stubFetch(routes: Record<string, unknown>) {
-  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
     const url = String(input);
     const key = Object.keys(routes).find((route) => url.endsWith(route));
     if (key === undefined) {
@@ -232,6 +232,44 @@ describe("Real telemetry workstation", () => {
     ).toBeInTheDocument();
     const replay = screen.getByRole("button", { name: /确认并回放/ });
     expect(replay).toBeDisabled();
+  });
+
+  it("offers playing the whole course and asks the backend for it", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const fetchMock = stubFetch({
+      "/api/v1/actions": {
+        actions: [],
+        course: { name: "stage_c", actions: ["p1_s0", "p2_s1"] },
+      },
+      "/api/v1/control/state": {
+        phase: "idle",
+        message: "",
+        action: "",
+        error_code: "",
+        available: true,
+        trajectory_duration_s: 0,
+        audio_playing: false,
+        gravity_compensation: false,
+      },
+      "/api/v1/control/replay": { phase: "planning", action: "整套 2 段" },
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<App />);
+
+    const courseButton = await screen.findByRole("button", { name: /回放整套/ });
+    expect(courseButton).toBeEnabled();
+
+    await act(async () => {
+      courseButton.click();
+    });
+
+    const call = fetchMock.mock.calls.find(([url]) =>
+      String(url).endsWith("/api/v1/control/replay"),
+    );
+    expect(call).toBeDefined();
+    const init = call?.[1] as RequestInit | undefined;
+    expect(JSON.parse(String(init?.body))).toEqual({ course: true, confirmed: true });
   });
 
   it("shows the real SDK2/DDS source and connection state", () => {

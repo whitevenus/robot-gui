@@ -20,6 +20,7 @@ from g1_action_studio.motion import Action, load_action
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SOURCE_EXTRA = "robot_gui"
 AUDIO_DIR_NAME = "audio"
+COURSE_FILE_NAME = "course.json"
 
 
 class ActionStoreError(RuntimeError):
@@ -28,6 +29,17 @@ class ActionStoreError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True)
+class Course:
+    """一整套课程：按讲解顺序排好的动作清单。"""
+
+    name: str
+    actions: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "actions": list(self.actions)}
 
 
 @dataclass(frozen=True)
@@ -79,12 +91,50 @@ class ActionStore:
             return []
         summaries: list[ActionSummary] = []
         for path in sorted(directory.glob("*.json")):
+            if path.name == COURSE_FILE_NAME:
+                continue
             try:
                 summaries.append(self._summarize(path))
             except (ActionStoreError, ValueError, json.JSONDecodeError):
                 # 单个坏文件不应让整个列表不可用，但也不能被当成有效动作。
                 continue
         return summaries
+
+    def load_course(self) -> Course:
+        """读取课程清单 `course.json`，拿到"一整套"的顺序。
+
+        顺序由清单给出，不靠文件名猜：ECHO-G 的课程包是按讲解顺序生成动作的，
+        而动作名里的 p1/p2 只是生成批次，不承载播放顺序。
+        """
+        path = self._require_dir() / COURSE_FILE_NAME
+        if not path.is_file():
+            raise ActionStoreError(
+                "course_not_found",
+                f"没有课程清单 {path}：整套播放需要它给出动作顺序。",
+            )
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ActionStoreError(
+                "course_invalid", f"课程清单读不出来：{error}"
+            ) from error
+        if not isinstance(raw, dict):
+            raise ActionStoreError("course_invalid", "课程清单必须是 JSON 对象。")
+        actions = raw.get("actions")
+        if not isinstance(actions, list) or not actions:
+            raise ActionStoreError(
+                "course_invalid", "课程清单的 actions 必须是非空的动作名列表。"
+            )
+        for name in actions:
+            if not isinstance(name, str) or not SAFE_NAME.fullmatch(name):
+                raise ActionStoreError(
+                    "course_invalid", f"课程清单里的动作名不合法：{name!r}"
+                )
+        name = raw.get("name")
+        return Course(
+            name=name if isinstance(name, str) and name else path.stem,
+            actions=tuple(actions),
+        )
 
     def _summarize(self, path: Path) -> ActionSummary:
         raw = json.loads(path.read_text(encoding="utf-8"))

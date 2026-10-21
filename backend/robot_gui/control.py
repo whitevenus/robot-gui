@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -31,12 +32,12 @@ from typing import Any
 import numpy as np
 from g1_action_studio.model import ArmModel
 from g1_action_studio.motion import Action, StartPose
-from g1_action_studio.planner import plan_sequence
+from g1_action_studio.planner import plan_sequence_with_marks
 from g1_action_studio.robot import RobotSession
 from loguru import logger
 
 from .actions import ActionStore, ActionStoreError
-from .audio import G1AudioPort, pcm_duration_s
+from .audio import G1AudioPort, build_timeline, pcm_duration_s
 from .gravity import GravityFeedforward, install_gravity_command_builder
 from .profile import LOWER_BODY_JOINT_NAMES
 
@@ -353,7 +354,7 @@ class ControlService:
 
     # ---- 前置检查 ----
 
-    def _preflight(self, action_name: str, confirmed: bool) -> Action:
+    def _preflight(self, action_names: Sequence[str], confirmed: bool) -> list[Action]:
         if not self._settings.enabled:
             raise ControlError(
                 "capability_disabled",
@@ -385,42 +386,55 @@ class ControlService:
                 "fsm_not_allowed",
                 f"FSM {fsm_id} 不在允许列表 {list(self._settings.fsm_whitelist)} 中。",
             )
-        try:
-            action = self._store.load(action_name)
-        except ActionStoreError as error:
-            raise ControlError(error.code, str(error)) from error
-        if action.group != "arms":
-            raise ControlError(
-                "action_group_unsupported",
-                f"动作组 {action.group} 不被接管：本工作台只回放 arms 组（14 维动作），"
-                "腰的三维锁在接管瞬间的姿态、不执行动作里的腰轨迹，腿由内置运控负责。",
-            )
-        return action
+        actions: list[Action] = []
+        for name in action_names:
+            try:
+                action = self._store.load(name)
+            except ActionStoreError as error:
+                raise ControlError(error.code, str(error)) from error
+            if action.group != "arms":
+                raise ControlError(
+                    "action_group_unsupported",
+                    f"动作组 {action.group} 不被接管：本工作台只回放 arms 组（14 维动作），"
+                    "腰的三维锁在接管瞬间的姿态、不执行动作里的腰轨迹，腿由内置运控负责。",
+                )
+            actions.append(action)
+        return actions
 
     # ---- 控制 ----
 
     def request_replay(
         self,
-        action_name: str,
+        action_names: Sequence[str],
         *,
         confirmed: bool,
-        audio_pcm: bytes | None = None,
+        audio_clips: dict[str, bytes] | None = None,
     ) -> dict[str, Any]:
+        """回放一个动作，或课程清单里的**一整套**。
+
+        一整套 = 多个动作按顺序规划成**一条连续轨迹**（动作之间是规划出来的衔接段，
+        不是各播各的再回基线），讲解语音按每个动作在轨迹里的起始时刻拼成一条
+        连续的 PCM，两边都按同一份时刻表走。
+        """
+        names = list(action_names)
+        if not names:
+            raise ControlError("action_required", "没有要回放的动作。")
         with self._lock:
             if self._worker is not None and self._worker.is_alive():
                 raise ControlError("control_busy", "已有控制会话在执行，拒绝并发接管。")
-        action = self._preflight(action_name, confirmed)
+        actions = self._preflight(names, confirmed)
         self._cancel = threading.Event()
-        self._set_phase(ControlPhase.PLANNING, f"正在规划 {action_name}")
+        label = names[0] if len(names) == 1 else f"整套 {len(names)} 段"
+        self._set_phase(ControlPhase.PLANNING, f"正在规划 {label}")
         worker = threading.Thread(
             target=self._run,
-            args=(action, audio_pcm),
+            args=(names, actions, dict(audio_clips or {})),
             name="robot-gui-control",
             daemon=False,
         )
         with self._lock:
             self._worker = worker
-            self._action_name = action_name
+            self._action_name = label
         worker.start()
         return self.state()
 
@@ -444,8 +458,9 @@ class ControlService:
 
     def _run(
         self,
-        action: Action,
-        audio_pcm: bytes | None,
+        names: list[str],
+        actions: list[Action],
+        audio_clips: dict[str, bytes],
     ) -> None:
         cancel = self._cancel
         session: RobotSession | None = None
@@ -467,8 +482,8 @@ class ControlService:
                     self._feedforward.bind_legs(np.asarray(start.leg_q, dtype=float))
                 self._set_phase(ControlPhase.PLANNING, "规划轨迹并做限位与避碰检查")
                 model = ArmModel(start.leg_q)
-                trajectory = plan_sequence(
-                    [action],
+                trajectory, marks = plan_sequence_with_marks(
+                    actions,
                     start,
                     model,
                     self._settings.replay_speed,
@@ -479,11 +494,14 @@ class ControlService:
                     self._trajectory_duration = float(trajectory.duration)
                 self._set_phase(ControlPhase.ACQUIRING, "接管双臂控制权")
                 session.acquire()
-                if audio_pcm and self._audio is not None:
-                    audio_thread = self._start_audio(audio_pcm, cancel)
+                if self._audio is not None and audio_clips:
+                    timeline = self._build_timeline(names, marks, audio_clips)
+                    if timeline:
+                        # 语音等"进入衔接段"过去再起播：那一刻正好是第一个动作的起点。
+                        audio_thread = self._start_audio(timeline, cancel, marks[0])
                 self._set_phase(
                     ControlPhase.PLAYING,
-                    f"回放 {action.group}，轨迹 {trajectory.duration:.1f} 秒",
+                    f"回放 {actions[0].group}，轨迹 {trajectory.duration:.1f} 秒",
                 )
                 monitor = TrackingMonitor(arm_joint_names())
                 lower = LowerBodyMonitor(self._settings.lower_body_drift_deg)
@@ -532,12 +550,30 @@ class ControlService:
             with self._lock:
                 self._worker = None
 
+    @staticmethod
+    def _build_timeline(
+        names: list[str], marks: list[float], clips: dict[str, bytes]
+    ) -> bytes:
+        """把各段讲解按动作在轨迹里的起始时刻拼成一条连续的 PCM。
+
+        缺的段（没有同名 pcm）就让它空着，不能让后面的提前。
+        """
+        base = marks[0]
+        return build_timeline(
+            [
+                (mark - base, clips[name])
+                for name, mark in zip(names, marks, strict=True)
+                if name in clips
+            ]
+        )
+
     def _start_audio(
         self,
         pcm: bytes,
         cancel: threading.Event,
+        start_delay: float,
     ) -> threading.Thread:
-        """让讲解语音与动作本体对齐：过渡段结束后再起播。
+        """让讲解语音与动作本体对齐：进入衔接段结束后再起播。
 
         **只走课程包原声的 PCM 推流，不做 TTS 兜底。** 兜底播的是云端合成的另一套
         音色，和课程包对不上；讲不出原声就不出声，比出个错的音色好。
@@ -545,7 +581,7 @@ class ControlService:
         assert self._audio is not None
 
         def worker() -> None:
-            if cancel.wait(self._settings.transition_seconds):
+            if cancel.wait(start_delay):
                 return
             error = self._audio.play(pcm, cancel)
             if error:

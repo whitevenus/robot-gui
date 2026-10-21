@@ -343,7 +343,7 @@ def test_replay_rejects_waist_action(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ControlError) as error:
-        service.request_replay("demo", confirmed=True)
+        service.request_replay(["demo"], confirmed=True)
     assert error.value.code == "action_group_unsupported"
 
 
@@ -355,5 +355,5 @@ def test_replay_accepts_arms_action(tmp_path: Path) -> None:
         action_store=store_with(tmp_path, "arms", 14),
     )
 
-    action = service._preflight("demo", confirmed=True)  # noqa: SLF001
-    assert action.group == "arms"
+    actions = service._preflight(["demo"], confirmed=True)  # noqa: SLF001
+    assert [action.group for action in actions] == ["arms"]

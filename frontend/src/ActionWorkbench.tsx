@@ -11,6 +11,11 @@ interface ActionSummary {
   has_audio: boolean;
 }
 
+interface Course {
+  name: string;
+  actions: string[];
+}
+
 interface ControlState {
   phase: string;
   message: string;
@@ -33,6 +38,7 @@ const PHASE_LABELS: Record<string, string> = {
 
 export function ActionWorkbench() {
   const [actions, setActions] = useState<ActionSummary[]>([]);
+  const [course, setCourse] = useState<Course | null>(null);
   const [state, setState] = useState<ControlState | null>(null);
   const [message, setMessage] = useState("");
   const [importName, setImportName] = useState("");
@@ -49,6 +55,7 @@ export function ActionWorkbench() {
       }
       const body = await response.json();
       setActions(body.actions ?? []);
+      setCourse(body.course ?? null);
     } catch (error) {
       setMessage(`动作库不可达：${String(error)}`);
     }
@@ -154,6 +161,35 @@ export function ActionWorkbench() {
     }
   }
 
+  async function runCourse() {
+    if (!course) return;
+    if (
+      !window.confirm(
+        `即将在真机上连续回放整套课程「${course.name}」（${course.actions.length} 段）。`
+          + "整套是一次连续接管，中途需要停止请按停止按钮或遥控器。请确认现场安全、"
+          + "机器人处于允许的 FSM 模式。",
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setMessage("");
+    try {
+      const response = await fetch("/api/v1/control/replay", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ course: true, confirmed: true }),
+      });
+      if (!response.ok) {
+        setMessage(await readError(response));
+        return;
+      }
+      await refreshState();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function runRelease() {
     setBusy(true);
     try {
@@ -234,9 +270,19 @@ export function ActionWorkbench() {
         )}
       </div>
 
+      {course && (
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={!available || busyControl || busy}
+          onClick={() => void runCourse()}
+        >
+          确认并回放整套（{course.name} · {course.actions.length} 段）
+        </button>
+      )}
       <button
         type="button"
-        className="btn btn-primary"
+        className="btn btn-ghost"
         disabled={!available || busyControl || busy || !selectedAction}
         onClick={() => {
           if (!selectedAction) return;

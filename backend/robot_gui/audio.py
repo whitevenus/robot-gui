@@ -33,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from typing import Protocol
 
 from loguru import logger
@@ -120,6 +121,33 @@ class AudioError(RuntimeError):
 
 def pcm_duration_s(pcm: bytes) -> float:
     return len(pcm) / BYTES_PER_SECOND
+
+
+def build_timeline(clips: Sequence[tuple[float, bytes]]) -> bytes:
+    """把若干段 PCM 按各自的起始时刻拼成**一条**连续的 PCM。
+
+    `clips` 是 (相对起点的秒数, PCM) 列表。段与段之间补静音，这样每段讲解都
+    落在动作自己的时刻上——动作之间还插着衔接段，按序号硬拼会越走越偏。
+
+    拼成一条而不是分段推，是因为官方接口「stream_id 不同则打断播放」：
+    分段推的话，后一段会把还没播完的前一段掐断。
+    """
+    out = bytearray()
+    cursor = 0.0
+    for offset, pcm in sorted(clips, key=lambda item: item[0]):
+        if offset < cursor - 1e-6:
+            # 上一段还没结束这一段就该开始了：语音会整体往后拖，如实记一笔。
+            logger.warning(
+                "语音片段 {} 秒处与上一段重叠 {:.2f} 秒，后续讲解会整体延后。",
+                offset,
+                cursor - offset,
+            )
+        gap = int(round((offset - cursor) * BYTES_PER_SECOND))
+        if gap > 0:
+            out.extend(b"\x00" * gap)
+        out.extend(pcm)
+        cursor = offset + len(pcm) / BYTES_PER_SECOND
+    return bytes(out)
 
 
 def validate_pcm(pcm: bytes) -> None:

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# 回放一次动作并打印逐关节跟踪误差、躯干姿态变化，以及腰的 mode 回读。
+# 回放一次动作（或课程清单里的**一整套**），打印逐关节跟踪误差、躯干姿态变化，
+# 以及腰的 mode 回读。
 #
 # 用法: ./tools/robot-gui-track.sh <动作名>   例如 p1_s2
+#       ./tools/robot-gui-track.sh course      播整套（按 data/course.json 的顺序）
 #
 # 脚本和采样器都在仓库的 tools/ 下，跟着代码一起部署，不往家目录散落。
 # 采样数据统一写仓库的 logs/ 目录。
@@ -16,7 +18,6 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BASE=http://127.0.0.1:8000
 PY=$ROOT/backend/.venv/bin/python
 SAMPLER=$ROOT/tools/pose_sampler.py
-SAMPLE_SECONDS=25
 LOGS=$ROOT/logs
 mkdir -p "$LOGS"
 OUT=$LOGS/pose_samples.json
@@ -25,6 +26,30 @@ OUT=$LOGS/pose_samples.json
 ENV_FILE=$ROOT/config/env.sh
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
 IFACE=${ROBOT_GUI_DDS_INTERFACE:-eth0}
+DATA_DIR=${ROBOT_GUI_DATA_DIR:-$ROOT/data}
+
+# 整套 = 课程清单里的所有动作连成一条轨迹；采样窗口要覆盖全程（含沉降期），
+# 否则前倾峰值会被漏掉（它是延迟发展的，见 docs §6.1）。
+if [ "$ACTION" = "course" ]; then
+  # 每段动作之间一段 2 秒衔接（进入 + 段间 + 返回），再加 3 秒沉降和 10 秒余量。
+  SAMPLE_SECONDS=$($PY -c "
+import json, pathlib, sys
+d = pathlib.Path(sys.argv[1])
+c = json.loads((d / 'course.json').read_text(encoding='utf-8'))
+motion = sum(float(json.loads((d / (n + '.json')).read_text(encoding='utf-8'))['frames'][-1]['t']) for n in c['actions'])
+print(int(motion + 2.0 * (len(c['actions']) + 1) + 13.0))
+" "$DATA_DIR")
+  REPLAY_BODY='{"course": true, "confirmed": true}'
+  LABEL="整套 $($PY -c "
+import json, pathlib, sys
+c = json.loads((pathlib.Path(sys.argv[1]) / 'course.json').read_text(encoding='utf-8'))
+print(str(len(c['actions'])) + ' 段')
+" "$DATA_DIR")"
+else
+  SAMPLE_SECONDS=${ROBOT_GUI_SAMPLE_SECONDS:-25}
+  REPLAY_BODY="{\"action\": \"$ACTION\", \"confirmed\": true}"
+  LABEL="$ACTION"
+fi
 
 show_state() {
   curl -sS --max-time 10 $BASE/api/v1/status | python3 -c "
@@ -53,13 +78,14 @@ echo
 $PY "$SAMPLER" "$IFACE" "$SAMPLE_SECONDS" --out "$OUT" &
 SAMPLER_PID=$!
 
-echo "=== 触发回放 $ACTION ==="
+echo "=== 触发回放 $LABEL ==="
 curl -sS --max-time 15 -X POST $BASE/api/v1/control/replay \
   -H 'Content-Type: application/json' \
-  -d "{\"action\": \"$ACTION\", \"confirmed\": true}" | head -c 300
+  -d "$REPLAY_BODY" | head -c 300
 echo
 echo "等待回放结束..."
-for i in $(seq 1 120); do
+# 等待上限跟着采样窗口走：整套要跑一分多钟，60 秒不够。
+for i in $(seq 1 $((SAMPLE_SECONDS * 2))); do
   P=$(curl -sS --max-time 5 $BASE/api/v1/control/state 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)['phase'])" 2>/dev/null)
   [ "$P" = "idle" ] || [ "$P" = "fault" ] && break
   sleep 0.5

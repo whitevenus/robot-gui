@@ -23,12 +23,13 @@ PCM 从 stdin 读（不在命令行里传，也不落临时文件）。stdout �
 
 协议要点（官方《音频灯光服务接口》）：
 
-- `PlayStream(app_name, stream_id, pcm)` **整段一次推完**。PCM 必须是
-  16 kHz / 单声道 / 16 bit。
+- `PlayStream(app_name, stream_id, pcm)` **分批推**，同一 stream_id 连续推就是
+  「缓存续播」，服务端接着播（官方例程也是 96000 字节一批、批间 sleep 1 秒）。
 - `stream_id` **相同为缓存续播，不同则打断播放**。所以失败时**不能**用同一个
   stream_id 重推（机器人端会把已播内容再播一遍），换新的则会打断当前播放。
 - 服务端的播放是异步的：推完不等于播完，要等整段时长过去再 `PlayStop`，
   立刻停会掐掉尾巴。
+- PCM 必须是 16 kHz / 单声道 / 16 bit。
 """
 
 from __future__ import annotations
@@ -43,6 +44,11 @@ import time
 
 SAMPLE_RATE = 16000
 BYTES_PER_SECOND = SAMPLE_RATE * 2
+#: 一批推多少字节：3 秒的音频（官方例程也是 96000 字节一批）。
+CHUNK_BYTES = 96000
+#: 每一批比"正好赶上播放"提前这么多秒推出去，留出播放端的抖动余量。
+#: 服务端因此只缓冲几秒音频，而不是整段（整段 100 秒就是 3 MB 的缓冲）。
+CHUNK_LEAD_S = 2.0
 #: 推完之后再多等这么久才 PlayStop：服务端的播放是异步的，立刻停会掐掉尾巴。
 TAIL_SINK_S = 0.3
 
@@ -56,6 +62,40 @@ def _stop_audio(client: object, app_name: str) -> None:
         client.PlayStop(app_name)  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 - 收尾失败只记日志，不影响退出码
         pass
+
+
+def _wait_until(deadline: float, stopped: threading.Event) -> None:
+    """等到 deadline 或被取消。分片睡，信号能及时打断。"""
+    while not stopped.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.1, remaining))
+
+
+def _push_stream(
+    client: object,
+    app_name: str,
+    stream_id: str,
+    pcm: bytes,
+    stopped: threading.Event,
+) -> int:
+    """分批推流，返回机器人端的返回码（0 = 全部接受）。"""
+    started = time.monotonic()
+    chunk_seconds = CHUNK_BYTES / BYTES_PER_SECOND
+    for index, offset in enumerate(range(0, len(pcm), CHUNK_BYTES)):
+        # 第 index 批覆盖 [index*chunk_seconds, (index+1)*chunk_seconds) 秒的音频，
+        # 提前 CHUNK_LEAD_S 秒推出去。
+        due = max(0.0, index * chunk_seconds - CHUNK_LEAD_S)
+        _wait_until(started + due, stopped)
+        if stopped.is_set():
+            return 0
+        block = pcm[offset : offset + CHUNK_BYTES]
+        reply = client.PlayStream(app_name, stream_id, block)  # type: ignore[attr-defined]
+        code = reply[0] if isinstance(reply, tuple) else reply
+        if code != 0:
+            return code
+    return 0
 
 
 def main() -> int:
@@ -87,25 +127,24 @@ def main() -> int:
 
     ChannelFactoryInitialize(0, args.interface)
     client = AudioClient()
-    # 超时给足：整段 PCM 要一次传过去，官方例程用的就是 10 秒。
+    # 超时给足：一批 PCM 要一次传过去，官方例程用的就是 10 秒。
     client.SetTimeout(args.timeout)
     client.Init()
 
+    started = time.monotonic()
     try:
-        reply = client.PlayStream(args.app_name, args.stream_id, pcm)
+        code = _push_stream(client, args.app_name, args.stream_id, pcm, stopped)
     except Exception as error:  # noqa: BLE001 - 推流异常要如实报出去
         _report({"code": -1, "error": repr(error)})
         return 1
-    code = reply[0] if isinstance(reply, tuple) else reply
     if code != 0:
         _report({"code": code})
         _stop_audio(client, args.app_name)
         return 1
 
     # 推完不等于播完：服务端的播放是异步的，等整段时长过去再收尾。
-    deadline = time.monotonic() + len(pcm) / BYTES_PER_SECOND + TAIL_SINK_S
-    while time.monotonic() < deadline and not stopped.is_set():
-        time.sleep(0.05)
+    deadline = started + len(pcm) / BYTES_PER_SECOND + TAIL_SINK_S
+    _wait_until(deadline, stopped)
     _stop_audio(client, args.app_name)
     _report({"code": 0})
     return 0

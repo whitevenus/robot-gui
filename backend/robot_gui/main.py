@@ -283,7 +283,12 @@ def create_app(
             summaries = store.list()
         except ActionStoreError as error:
             raise _error(error.code, str(error), status=503) from error
-        return {"actions": [item.as_dict() for item in summaries]}
+        # 课程清单（如果有）一起给前端：有它才有"播放整套"这个入口。
+        try:
+            course = store.load_course().as_dict()
+        except ActionStoreError:
+            course = None
+        return {"actions": [item.as_dict() for item in summaries], "course": course}
 
     @app.post("/api/v1/actions/import", status_code=201)
     async def import_action(payload: dict[str, Any]) -> dict[str, Any]:
@@ -330,21 +335,44 @@ def create_app(
 
     @app.post("/api/v1/control/replay")
     async def replay(payload: dict[str, Any]) -> dict[str, Any]:
-        action = payload.get("action")
-        if not isinstance(action, str) or not action:
-            raise _error("action_required", "缺少要回放的动作名 action。", status=400)
+        """回放一个动作，或课程清单里的**一整套**。
+
+        - `{"action": "p1_s2"}`：单个动作（调试用）
+        - `{"course": true}`：按 `data/course.json` 的顺序播整套
+
+        整套是一条连续轨迹：动作之间是规划出来的衔接段，讲解语音按每个动作在
+        轨迹里的起始时刻拼成一条连续的 PCM。
+        """
         confirmed = payload.get("confirmed") is True
         requested = payload.get("audio")
         explicit = isinstance(requested, str) and bool(requested)
+        if payload.get("course") is True:
+            try:
+                names = list(store.load_course().actions)
+            except ActionStoreError as error:
+                raise _error(error.code, str(error), status=404) from error
+            # 整套播放时每段用同名语音；显式指定的 audio 只对单动作有意义。
+            explicit = False
+        else:
+            action = payload.get("action")
+            if not isinstance(action, str) or not action:
+                raise _error(
+                    "action_required", "缺少要回放的动作名 action。", status=400
+                )
+            names = [action]
         # 未显式指定语音时，自动用与动作同名的 PCM，让讲解和手势一起播；
         # 找不到就安静地不播语音（不做 TTS 兜底）。
-        audio_name = requested if explicit else action
-        audio_pcm = _read_audio(store, audio_name, required=explicit)
+        clips: dict[str, bytes] = {}
+        for name in names:
+            audio_name = requested if explicit else name
+            pcm = _read_audio(store, audio_name, required=explicit)
+            if pcm is not None:
+                clips[name] = pcm
         try:
             return control.request_replay(
-                action,
+                names,
                 confirmed=confirmed,
-                audio_pcm=audio_pcm,
+                audio_clips=clips,
             )
         except ControlError as error:
             raise _error(error.code, str(error)) from error
