@@ -25,10 +25,21 @@ from robot_gui.telemetry import TelemetryHub
 class FakeAdapter:
     """带 FSM 切换能力的假适配器（接口与 UnitreeSdkTelemetryAdapter 一致）。"""
 
-    def __init__(self, switch_code: int = 0, fsm_id: int = 501) -> None:
+    def __init__(
+        self,
+        switch_code: int = 0,
+        fsm_id: int = 501,
+        fsm_mode: int = 0,
+        settle_reads: int = 0,
+    ) -> None:
         self.switch_code = switch_code
         self.fsm_id = fsm_id
+        self.fsm_mode = fsm_mode
+        # 固件接受请求后要几次回读才真的切过去（0 = 立刻切）。
+        self.settle_reads = settle_reads
         self.switched: list[int] = []
+        self._reads = 0
+        self._pending: int | None = None
 
     def start(self, publish, publish_error) -> None:
         publish(
@@ -58,12 +69,19 @@ class FakeAdapter:
 
     def switch_mode(self, fsm_id: int) -> tuple[int, str]:
         self.switched.append(fsm_id)
+        self._reads = 0
         if self.switch_code == 0:
-            self.fsm_id = fsm_id
+            self._pending = fsm_id
         return self.switch_code, "" if self.switch_code == 0 else "机器人拒绝"
 
     def refresh_mode(self) -> dict[str, Any]:
-        return {"id": self.fsm_id}
+        # 模拟固件的落定延迟：前 settle_reads 次回读还是旧模式。
+        if self._pending is not None:
+            self._reads += 1
+            if self._reads > self.settle_reads:
+                self.fsm_id = self._pending
+                self._pending = None
+        return {"id": self.fsm_id, "mode": self.fsm_mode}
 
 
 class FakeControl:
@@ -307,3 +325,46 @@ def test_snapshot_publishes_the_fsm_id(tmp_path) -> None:
         snapshot = client.get("/api/v1/status").json()
 
     assert snapshot["robot"]["fsm"]["id"] == 0
+
+
+# ---- 模式落定与拒绝 ----
+
+
+def test_request_waits_for_the_mode_to_settle() -> None:
+    """固件接受请求后不会立刻换状态，必须等它落定。
+
+    2026-10-21 真机实测：同一个 SetFsmId(501)，立刻回读还是旧模式，被误判成
+    "没切成"；等 10 秒才真的切过去。所以这里要轮询等落定，而不是回读一次就下结论。
+    """
+    adapter = FakeAdapter(fsm_id=501, settle_reads=3)
+    service, _ = build_service(adapter=adapter)
+
+    state = service.request_mode(4, confirmed=True)
+
+    assert adapter.switched == [4]
+    assert state["current"]["id"] == 4
+
+
+def test_request_reports_rejection_when_the_mode_never_changes() -> None:
+    """固件没真的切换时**如实报错**，不能返回 200 假装成功。"""
+    adapter = FakeAdapter(fsm_id=501, fsm_mode=1, settle_reads=999)
+    service, _ = build_service(adapter=adapter)
+
+    with pytest.raises(FsmError) as error:
+        service.request_mode(4, confirmed=True)
+
+    assert error.value.code == "fsm_switch_rejected"
+    # 机器人处于运动状态时固件会拒绝这种切换，提示里要说清楚。
+    assert "运动状态" in error.value.args[0]
+
+
+def test_state_exposes_the_fsm_mode() -> None:
+    """状态里带 fsm_mode，前端据此提示"为什么切不动"。"""
+    adapter = FakeAdapter(fsm_id=501, fsm_mode=1)
+    service, _ = build_service(adapter=adapter)
+
+    service.request_mode(4, confirmed=True)
+    state = service.state()
+
+    assert state["current"]["id"] == 4
+    assert state["current"]["mode"] == 1

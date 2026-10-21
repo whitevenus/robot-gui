@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from typing import Any, Callable, Protocol
@@ -187,7 +188,7 @@ class UnitreeSdkTelemetryAdapter:
     # ---- FSM 模式切换 ----
 
     def refresh_mode(self) -> dict[str, Any]:
-        """立刻回读当前 FSM 状态（切换后用来确认是否真的生效）。"""
+        """立刻回读当前 FSM 状态（fsm_id + fsm_mode）。"""
         fsm_id: int | None = None
         try:
             result, value = self._loco_client.GetFsmId()
@@ -195,7 +196,28 @@ class UnitreeSdkTelemetryAdapter:
                 fsm_id = int(value)
         except Exception:
             logger.exception("回读 FSM ID 失败。")
-        return {"id": fsm_id}
+        return {"id": fsm_id, "mode": self._read_fsm_mode()}
+
+    def _read_fsm_mode(self) -> int | None:
+        """回读 fsm_mode：0=静态（允许切换到其他模式），1=动态（固件拒绝大部分切换）。
+
+        SDK 的 LocoClient 没有暴露 GetFsmMode，只能走底层的通用 RPC 通道
+        （ROBOT_API_ID_LOCO_GET_FSM_MODE = 7002），返回 `{"data": 0|1}`。
+        """
+        try:
+            from unitree_sdk2py.g1.loco.g1_loco_api import (
+                ROBOT_API_ID_LOCO_GET_FSM_MODE,
+            )
+
+            result, data = self._loco_client._Call(
+                ROBOT_API_ID_LOCO_GET_FSM_MODE, "{}"
+            )
+            if result != 0 or not data:
+                return None
+            return int(json.loads(data).get("data"))
+        except Exception:
+            logger.debug("回读 fsm_mode 失败。", exc_info=True)
+            return None
 
     def switch_mode(self, fsm_id: int) -> tuple[int, str]:
         """请求切换到指定 FSM ID 的模式。返回 (错误码, 补充说明)。

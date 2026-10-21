@@ -33,10 +33,15 @@ Python SDK 里还有几个语义化的糖：`ZeroTorque()` = SetFsmId(0)、`Damp
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+#: 模式切换的落定等待上限。固件接受 SetFsmId 后不会立刻换状态，实测要好几秒。
+#: 2026-10-21 真机实测：等 2.5 秒回读还是旧模式，等 10 秒才切过去。
+SWITCH_SETTLE_TIMEOUT_S = 12.0
 
 
 class FsmError(RuntimeError):
@@ -154,6 +159,9 @@ class FsmService:
         self._controls_enabled = controls_enabled
         self._control = control
         self._whitelist = fsm_whitelist
+        #: 最近一次回读到的 fsm_mode（0=静态、1=动态）。只在切换时刷新，
+        #: 不放进高频的遥测轮询里。
+        self._fsm_mode: int | None = None
 
     # ---- 状态 ----
 
@@ -163,7 +171,6 @@ class FsmService:
         if not isinstance(fsm, dict):
             return {"id": None}
         return {"id": fsm.get("id")}
-
     def _reason(self) -> str:
         if not self._controls_enabled:
             return "真机控制未开启（ROBOT_GUI_CONTROLS_ENABLED=1）前不允许切换运动模式。"
@@ -185,7 +192,7 @@ class FsmService:
         return {
             "available": not reason,
             "reason": reason,
-            "current": current,
+            "current": {**current, "mode": self._fsm_mode},
             # 允许下发控制命令的 FSM ID 列表，页面据此提示"当前能不能回放"。
             "whitelist": list(self._whitelist),
             "modes": modes,
@@ -232,20 +239,44 @@ class FsmService:
                 "fsm_switch_failed",
                 f"切换到 {mode.label}（{fsm_id}）被机器人拒绝，错误码 {code}。{detail}",
             )
-        after = self._adapter.refresh_mode()
-        # 把回读结果立刻写回遥测：否则页面在下一次轮询（最多 1 秒）之前还会显示旧模式。
+        # 固件的模式切换有落定时间：请求被接受后可能要好几秒才真的切过去。
+        # 2026-10-21 真机实测：同一个 SetFsmId(501)，等 2.5 秒回读还是旧模式、
+        # 被误判成"没切成"，等 10 秒才切过去。所以这里轮询等它落定，而不是
+        # 立刻回读一次就下结论。
+        after = self._wait_for_mode(fsm_id)
+        # 把回读结果写回遥测：否则页面在下一次轮询（最多 1 秒）之前还会显示旧模式。
         self._telemetry.ingest(
             "fsm",
-            {"id": after.get("id"), "mode": None},
+            {"id": after.get("id"), "mode": after.get("mode")},
         )
         if after.get("id") == fsm_id:
             logger.info("FSM 模式已切换：%s → %s", before.get("id"), fsm_id)
-        else:
-            # 官方对每个切换接口都写了"最终状态切换是否成功取决于内置运控的状态切换逻辑"，
-            # 所以 RPC 成功不等于模式真的切过去了，这里如实报出来。
-            logger.warning(
-                "FSM 切换请求已接受（目标 %s），但回读到的模式是 %s，模式没有真正切换。",
-                fsm_id,
-                after.get("id"),
+            return self.state()
+
+        # 官方对每个切换接口都写了"最终状态切换是否成功取决于内置运控的状态切换逻辑"，
+        # 所以 RPC 成功不等于模式真的切过去了。这里**如实报错**，不返回 200 假装成功。
+        current = after.get("id")
+        fsm_mode = after.get("mode")
+        hint = ""
+        if fsm_mode == 1:
+            hint = (
+                "机器人当前处于**运动状态**（fsm_mode=1），固件会拒绝这种切换："
+                "先让机器人静立，或用遥控器 L2+B 进阻尼模式再切。"
             )
-        return self.state()
+        raise FsmError(
+            "fsm_switch_rejected",
+            f"模式切换没有被固件执行：请求切到 {mode.label}（{fsm_id}）已被接受，"
+            f"但 {SWITCH_SETTLE_TIMEOUT_S:.0f} 秒内回读到的仍是 {current}。"
+            f"{hint}"
+            "也可以直接用遥控器切换运动模式。",
+        )
+
+    def _wait_for_mode(self, fsm_id: int) -> dict[str, Any]:
+        """轮询回读，直到模式真的切过去（或超时）。"""
+        deadline = time.monotonic() + SWITCH_SETTLE_TIMEOUT_S
+        state = self._adapter.refresh_mode()
+        while state.get("id") != fsm_id and time.monotonic() < deadline:
+            time.sleep(0.5)
+            state = self._adapter.refresh_mode()
+        self._fsm_mode = state.get("mode")
+        return state
