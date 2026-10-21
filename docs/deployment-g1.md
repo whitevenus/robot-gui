@@ -44,12 +44,24 @@ uv pip install --python backend/.venv/bin/python /usr/local/src/unitree_sdk2_pyt
 ```
 
 `g1-action-studio` 通过 `backend/pyproject.toml` 的 `tool.uv.sources` 以**显式 path 依赖**
-指向 `references/g1-action-studio`，随仓库分发，不需要单独安装。
+指向 `references/g1-action-studio`，不需要单独安装。
 `planning` extra 会装 MuJoCo（几何检测）与 OMPL（衔接段绕行，仅 Linux）。
 
-> **部署时容易被裁掉的一步**：`references/g1-action-studio` 必须在目标机上真实存在。
-> 2026-10-20 实测这台机器人上该目录是空的（部署时被裁剪），导致 `uv sync` 找不到包。
-> 修复方式是把已部署的一份源码拷回去：
+> **`references/g1-action-studio` 是 git 子模块**，但父仓库里没有 `.gitmodules`，
+> 仓库中只有一个指针（`references/` 下三个目录都是这样）。所以**`git pull` 不会更新
+> 它的内容**：机器人上那份是源码拷贝，不同步的话后端会缺新函数而起不来
+> （2026-10-21 实测：规划层加了 `plan_sequence_with_marks`，机器人上还是旧版）。
+>
+> 同步方式（机器人上直接 clone 到指针记录的提交）：
+>
+> ```bash
+> cd /usr/local/src/robot-gui
+> mv references/g1-action-studio /tmp/g1-action-studio.bak
+> git clone --quiet https://github.com/whitevenus/g1-action-studio.git references/g1-action-studio
+> cd references/g1-action-studio && git checkout --quiet 5f9c1ae && cd ../..
+> ```
+>
+> 兜底是把一份源码拷回去（机器人上没有 GitHub 访问时）：
 >
 > ```bash
 > mkdir -p references/g1-action-studio
@@ -180,10 +192,11 @@ python3 tools/check_waist_locked.py eth0 --seconds 60   # 物理锁腰判别（�
 | 脚本 | 用途 |
 |---|---|
 | `tools/robot-gui.sh` | 启停后端与前端，日志写 `logs/` |
-| `tools/robot-gui-track.sh` | 回放一次动作，打印跟踪误差、下盘漂移、腰 14 全程曲线 |
+| `tools/robot-gui-track.sh` | 回放一次动作（或 `course` 播整套），打印跟踪误差、下盘守卫、腰 14 全程曲线 |
 | `tools/pose_sampler.py` | 全程姿态采样器（由 track.sh 调用，输出 `logs/pose_samples.json`） |
 | `tools/inspect_fsm.py` | 读 `fsm_id` 与 `fsm_mode`（静态/运动） |
 | `tools/check_waist_locked.py` | 物理锁腰判别：腰掰不动 + 膝盖能掰动 = 装了固定件 |
+| `tools/play_audio.py` | 只放讲解语音，不动机器人（`p1_s2` 放一段，`--course` 放整套） |
 
 看后端日志：`tail -f logs/backend.log`。
 
@@ -192,6 +205,25 @@ python3 tools/check_waist_locked.py eth0 --seconds 60   # 物理锁腰判别（�
 
 **部署安全**：HTTP 服务面向局域网且不实现登录（FR-20）。只放在受信任网络，
 禁止直接暴露到公网。页面上的"确认"是误触防护，**不是身份认证**。
+
+### 3.1 一整套连续播放
+
+课程包里的一整套 = `data/course.json` 给出的动作顺序（ECHO-G 按讲解顺序生成动作，
+动作名里的 p1/p2 只是生成批次，不承载播放顺序）。整套**一次连续接管**播完，
+不是各播各的再回基线：
+
+- 动作之间是 `plan_sequence` 规划出来的衔接段（避碰 + 自碰撞检查都在里面）。
+- 讲解语音按每个动作在轨迹里的起始时刻拼成**一条**连续的 PCM，段间补静音。
+  官方接口「stream_id 不同则打断播放」，所以不能分段推。
+- 语音推流在**独立子进程**里做（`robot_gui.audio_worker`）：同进程里推，
+  回放期间会收不到 RPC 回包（见 §6.3）。
+
+```bash
+./tools/robot-gui-track.sh course      # 整套 + 全程采样（窗口自动按整套时长拉长）
+backend/.venv/bin/python tools/play_audio.py --course   # 只放整套语音，不动机器人
+```
+
+页面上也有「确认并回放整套」按钮（课程清单存在时才出现）。
 
 ### 2.5 Unitree SDK2 的 CRC 动态库
 SDK2 的 `setup.py` 不把 `utils/lib/*.so` 打进 wheel，`pip`/`uv` 安装完成后
@@ -473,6 +505,30 @@ t≥21s     稳定 -1.79°（固件的平衡回路重新接管）
 2026-10-21 实测的跟踪误差是**尖峰型**（肩 pitch 最大 0.146 rad / 平均 0.034 rad），
 不是稳态下垂：说明是**动态跟踪刚度不足**，不是重力没补偿对。提高 kp 同时压峰值和均值，
 这也是把手臂 kp 从 80 提到 120 的依据。
+
+### 6.3 语音推流必须在独立进程里
+
+2026-10-21 真机实测（`.165`），同一个 `PlayStream` 调用：
+
+| 在哪推 | 回放期间的表现 |
+|---|---|
+| 后端进程内 | **收不到 RPC 回包**，等满 10 秒超时（3104 = `RPC_ERR_CLIENT_API_TIMEOUT`） |
+| 独立进程 | 回包稳定 0.05 秒，连测 29 次全通 |
+
+而**服务端其实已经收到并播了音频**——现场表现是"声音正常，但后端报失败"，
+还白等 20 秒（推流 10 秒 + `PlayStop` 10 秒）。
+
+原因在 SDK 的结构：`ChannelFactory` 是单例，**整个进程共用一个 DDS participant**。
+后端进程里同时跑着控制回路（50 Hz 发 `rt/arm_sdk`）、遥测订阅（`rt/lowstate`
+实测 1050 Hz 的回调）和音频 RPC，三者挤在同一个 participant 上，回包就收不到了。
+
+⇒ 语音一律走 `robot_gui.audio_worker` 子进程（它有自己的 participant）。
+另外两条实测结论也写进了代码：
+
+- **整段一次推**：分块只会把"第 N 块被拒 → 只播开头几个字"的故障面放大。
+- **失败不能重推**：官方接口「stream_id 相同为缓存续播」，重推同一块会让机器人端
+  把已播内容**再播一遍**（真机实测：开头几个字之后同一句重复了一遍）。
+
 ## 7. 上肢下垂：重力前馈
 
 `rt/arm_sdk` 报文里 `motor_cmd[i].tau` 是**前馈关节力矩**，接收端把它加在 PD 项之外：
