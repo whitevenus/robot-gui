@@ -1,0 +1,14 @@
+# 统一按 LF 提交与检出，覆盖 core.autocrlf=true，
+# 这样 Windows 开发机与 Linux 机器人上的工作副本行尾一致，
+# 直接同步文件也不会产生整文件重写式的 diff。
+* text=auto eol=lf
+
+# Windows 批处理脚本保持 CRLF（与 .editorconfig 的策略一致）。
+*.{bat,cmd,ps1} text eol=crlf
+
+# .agents/skills 是带 hash 锁的 vendored 副本（见 skills-lock.json 的 computedHash）：
+# 索引存 LF（与其他文件一致），但工作副本保持 CRLF —— 与同步来源
+# tmp/goal-workflow-master 一致。改工作副本会让 computedHash 失配。
+# 注意这里必须写 text eol=crlf 而不是 -text：-text 会让 git 不做归一化，
+# 工作副本的 CRLF 与索引的 LF 就再也对不上，status 恒脏。
+.agents/** text eol=crlf

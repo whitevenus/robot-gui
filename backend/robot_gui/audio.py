@@ -9,6 +9,9 @@ PCM 必须是 16 kHz / 单声道 / 16 bit，每块 5120 字节正好 160 毫秒�
 一个必须记住的坑：SDK2 的 PlayStop 不校验 RPC 返回码就返回 0，所以主动中断之后
 无法确认音频流是否真的停了。这里用 _recovery_unconfirmed 闩锁记住这件事，一旦发生
 就不再播放新音频，直到进程重启或运维确认。
+
+**只有 PCM 一条路**：不做官方 TTS 兜底。兜底播的是云端合成的另一套音色，和课程包
+对不上；讲不出原声就不出声，比出个错的音色好。
 """
 from __future__ import annotations
 
@@ -82,13 +85,11 @@ class G1AudioPort:
         self,
         client: G1AudioClient | AudioClientFactory,
         app_name: str,
-        speaker_id: int = 0,
     ) -> None:
         if not app_name:
             raise ValueError("必须指定 app_name")
         self._client_source = client
         self._app_name = app_name
-        self._speaker_id = speaker_id
         self._lock = threading.Lock()
         self._active_stream_id = ""
         self._recovery_unconfirmed = False
@@ -147,23 +148,6 @@ class G1AudioPort:
         except Exception:
             self.stop()
             return "audio.sdk_exception"
-
-    def speak(self, text: str) -> str:
-        """用官方 TTS 接口播报文本（云端合成）。
-
-        这是参考项目 g1-voice-command 在真机上验证过的路径，与 PlayStream 推流互为
-        备份：推流保留课程包原声，TTS 兜底保证讲解一定有声音。
-        """
-        text = text.strip()
-        if not text:
-            return "audio.empty_text"
-        try:
-            code = self._client.TtsMaker(text, self._speaker_id)
-        except Exception:
-            return "audio.tts_exception"
-        if code != 0:
-            return "audio.tts_rejected"
-        return ""
 
     def stop(self) -> str:
         """停止播放；返回空串表示已确认停止，否则返回稳定错误码。"""

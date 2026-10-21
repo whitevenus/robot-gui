@@ -24,10 +24,11 @@ from test_real_telemetry import TelemetryTestAdapter
 
 
 def sample_action(frames: int = 4) -> dict[str, Any]:
+    """arms 组 = 只接管双臂的 14 维动作。"""
     return {
-        "group": "arms_waist",
+        "group": "arms",
         "frames": [
-            {"t": round(index * 0.04, 4), "q": [0.0] * 17}
+            {"t": round(index * 0.04, 4), "q": [0.0] * 14}
             for index in range(frames)
         ],
     }
@@ -62,13 +63,13 @@ def test_action_store_import_list_export_delete(tmp_path: Path) -> None:
     body = json.dumps(sample_action()).encode("utf-8")
 
     summary = store.import_action("demo", body)
-    assert summary.group == "arms_waist"
+    assert summary.group == "arms"
     assert summary.frames == 4
     assert summary.duration_s == pytest.approx(0.12)
 
     assert [item.name for item in store.list()] == ["demo"]
     assert store.export_action("demo") == body
-    assert store.load("demo").group == "arms_waist"
+    assert store.load("demo").group == "arms"
 
     store.delete("demo")
     assert store.list() == []
@@ -84,7 +85,7 @@ def test_action_store_rejects_duplicate_and_invalid_payload(tmp_path: Path) -> N
     assert duplicate.value.code == "action_exists"
 
     with pytest.raises(ActionStoreError) as invalid:
-        store.import_action("bad", json.dumps({"group": "arms_waist", "frames": []}).encode())
+        store.import_action("bad", json.dumps({"group": "arms", "frames": []}).encode())
     assert invalid.value.code == "action_invalid"
 
     with pytest.raises(ActionStoreError) as unsafe:
@@ -106,7 +107,6 @@ class RecordingAudioClient:
     def __init__(self) -> None:
         self.chunks: list[bytes] = []
         self.stopped = 0
-        self.spoken: list[str] = []
 
     def PlayStream(self, app_name: str, stream_id: str, pcm_data: bytes):
         self.chunks.append(pcm_data)
@@ -114,10 +114,6 @@ class RecordingAudioClient:
 
     def PlayStop(self, app_name: str):
         self.stopped += 1
-        return 0
-
-    def TtsMaker(self, text: str, speaker_id: int):
-        self.spoken.append(text)
         return 0
 
 
@@ -135,11 +131,9 @@ def test_audio_port_streams_in_chunks_and_stops() -> None:
     assert port.playing is False
 
 
-def test_audio_port_falls_back_to_tts_for_text() -> None:
-    client = RecordingAudioClient()
-    port = G1AudioPort(client, "robot-gui")
-    assert port.speak("同学们好") == ""
-    assert client.spoken == ["同学们好"]
+def test_audio_port_has_no_tts_fallback() -> None:
+    """只走 PCM：音频端口不再提供 TTS 播报，讲解出声只有课程包原声一路。"""
+    assert not hasattr(G1AudioPort, "speak")
 
 
 def test_audio_port_rejects_odd_length_and_double_play() -> None:
@@ -245,14 +239,14 @@ def test_action_endpoints_round_trip(tmp_path: Path) -> None:
             json={"name": "demo", "action": sample_action()},
         )
         assert created.status_code == 201
-        assert created.json()["group"] == "arms_waist"
+        assert created.json()["group"] == "arms"
 
         listing = client.get("/api/v1/actions").json()
         assert [item["name"] for item in listing["actions"]] == ["demo"]
 
         exported = client.get("/api/v1/actions/demo")
         assert exported.status_code == 200
-        assert exported.json()["group"] == "arms_waist"
+        assert exported.json()["group"] == "arms"
 
         assert client.delete("/api/v1/actions/demo").json() == {"deleted": "demo"}
         assert client.get("/api/v1/actions").json()["actions"] == []
@@ -306,11 +300,10 @@ def test_replay_auto_picks_matching_audio(
 
     captured: dict[str, object] = {}
 
-    def recording_request_replay(self, action, *, confirmed, audio_pcm=None, audio_text=None):
+    def recording_request_replay(self, action, *, confirmed, audio_pcm=None):
         captured["action"] = action
         captured["confirmed"] = confirmed
         captured["audio"] = audio_pcm
-        captured["text"] = audio_text
         return self.state()
 
     app = real_test_app(tmp_path)

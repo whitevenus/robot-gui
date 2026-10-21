@@ -1,4 +1,4 @@
-"""上肢 17 关节的重力前馈力矩。
+"""上肢关节的重力前馈力矩。
 
 `rt/arm_sdk` 报文里 `motor_cmd[i].tau` 是**前馈关节力矩**，接收端把它加在 PD 项之外：
 
@@ -20,6 +20,9 @@
 2. **腿部姿态必须用实测值。** 腰关节的重力力矩对腿部姿态非常敏感：模型默认腿姿
    （直腿）下 waist_pitch 约 +4.9 Nm，而实测蹲姿约 +1.4 Nm，差 3.5 Nm。
    上肢动作的几秒内腿基本不动，所以腿部取会话开始时的实测值即可。
+
+**只接管双臂**：腰的槽位不发指令（mode=0），前馈也只应用在双臂上。
+腰的角度仍然参与重力模型，因为手臂的重力力矩依赖躯干姿态。
 """
 from __future__ import annotations
 
@@ -27,6 +30,8 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 import numpy as np
+
+from .profile import ARM_SDK_SLOTS, WAIST_SDK_SLOTS
 
 # 测量姿态提供者：返回 (腿部 12 维, 上肢 17 维) 的实测关节角。
 MeasuredPose = tuple[np.ndarray, np.ndarray]
@@ -41,7 +46,11 @@ def default_model_path() -> Path:
 
 
 class GravityFeedforward:
-    """按当前实测姿态计算上肢 17 关节的重力前馈力矩。"""
+    """按当前实测姿态计算上肢的重力前馈力矩。
+
+    模型按 17 维上肢算（腰角参与重力模型），但**只应用在双臂的 14 个关节上**——
+    腰不由我们驱动。
+    """
 
     def __init__(
         self,
@@ -112,6 +121,9 @@ class _StudioRobot(Protocol):
 
 
 _ACTIVE_FEEDFORWARD: GravityFeedforward | None = None
+#: 腰槽位写入的 motor_cmd.mode。0=不接管腰（固件继续管），1=arm_sdk 接管腰。
+#: 1 是**诊断档**，只在真机上判别 mode 语义时用。
+_ACTIVE_WAIST_SLOT_MODE = 0
 _PATCHED = False
 
 
@@ -119,22 +131,44 @@ def active_feedforward() -> GravityFeedforward | None:
     return _ACTIVE_FEEDFORWARD
 
 
-def install_gravity_command_builder(feedforward: GravityFeedforward | None) -> None:
-    """给 g1-action-studio 装上重力前馈。
+def install_gravity_command_builder(
+    feedforward: GravityFeedforward | None,
+    waist_slot_mode: int = 0,
+) -> None:
+    """给 g1-action-studio 装上重力前馈，并把手臂以外的下盘排除出接管范围。
 
-    g1-action-studio 的 `build_command` 把 `motor.tau` 硬编码为 0，没有重力前馈。
-    参考实现按项目约束是只读的，所以这里替换它的命令构造函数，而不是改参考仓库的源码。
-    替换后的行为与原实现完全一致，只有 tau 从 0 变成按实测姿态算出的前馈力矩。
+    g1-action-studio 的 `build_command` 把 `motor.tau` 硬编码为 0，没有重力前馈，
+    而且会填满上肢 17 个槽位（连腰一起）。参考实现按项目约束是只读的，所以这里
+    替换它的命令构造函数，而不是改参考仓库的源码。替换后有三处行为变化：
+
+    1. tau 从 0 变成按实测姿态算出的前馈力矩；
+    2. **只下发双臂的槽位**，腰的三个槽位增益与目标全 0；
+    3. 腰槽位的 `mode` 由 `waist_slot_mode` 决定，默认 0（不由 arm_sdk 驱动）。
+
+    **必须无条件安装**：关掉重力前馈（`feedforward=None`）时如果不装这个补丁，
+    就会退回 studio 原版 `build_command`，那会把腰一起接管——正好是要避免的事。
     """
-    global _ACTIVE_FEEDFORWARD, _PATCHED
+    global _ACTIVE_FEEDFORWARD, _ACTIVE_WAIST_SLOT_MODE, _PATCHED
+
+    if waist_slot_mode not in (0, 1):
+        raise ValueError("waist_slot_mode 只能是 0（不接管腰）或 1（arm_sdk 接管腰）")
 
     import g1_action_studio.robot as studio_robot
 
     _ACTIVE_FEEDFORWARD = feedforward
+    _ACTIVE_WAIST_SLOT_MODE = waist_slot_mode
     if _PATCHED:
         return
 
     from g1_action_studio.model import UPPER_SLOTS
+
+    # studio 的 upper_q 顺序是双臂在前、腰在后，UPPER_SLOTS 给出各自的 SDK 槽位。
+    arm_slots = UPPER_SLOTS[: len(ARM_SDK_SLOTS)]
+    waist_slots = UPPER_SLOTS[len(ARM_SDK_SLOTS) :]
+    if set(arm_slots) != set(ARM_SDK_SLOTS) or set(waist_slots) != set(WAIST_SDK_SLOTS):
+        raise RuntimeError(
+            "g1-action-studio 的上肢槽位顺序与 robot_gui.profile 的接管范围不一致。"
+        )
 
     def build_command(q, dq, kp, kd, weight, crc):
         from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
@@ -142,7 +176,7 @@ def install_gravity_command_builder(feedforward: GravityFeedforward | None) -> N
         command = unitree_hg_msg_dds__LowCmd_()
         feedforward = _ACTIVE_FEEDFORWARD
         tau = feedforward.torques(q) if feedforward is not None else None
-        for index, slot in enumerate(UPPER_SLOTS):
+        for index, slot in enumerate(arm_slots):
             motor = command.motor_cmd[slot]
             # mode=1 表示使能该电机（SDK 文档：0=Disable / 1=Enable）。
             # 参考实现 demo1/fk/g1_arm.py 每次写指令都带 mode，缺了它电机是不使能的。
@@ -152,6 +186,17 @@ def install_gravity_command_builder(feedforward: GravityFeedforward | None) -> N
             motor.kp = float(kp[index])
             motor.kd = float(kd[index])
             motor.tau = float(tau[index]) if tau is not None else 0.0
+        # 腰不接管：mode=0 表示这路电机不由 arm_sdk 驱动，固件继续用内置平衡回路管腰。
+        # 诊断档 mode=1 时 arm_sdk 名义上接管了腰，但增益仍是 0——用来在真机上判别
+        # mode 的语义（腰会不会瘫），**不是**可用的控制模式。
+        for slot in waist_slots:
+            motor = command.motor_cmd[slot]
+            motor.mode = _ACTIVE_WAIST_SLOT_MODE
+            motor.q = 0.0
+            motor.dq = 0.0
+            motor.kp = 0.0
+            motor.kd = 0.0
+            motor.tau = 0.0
         command.motor_cmd[29].q = float(weight)
         command.crc = crc.Crc(command)
         return command

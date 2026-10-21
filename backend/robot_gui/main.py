@@ -22,6 +22,7 @@ from .control import (
     load_gains,
     measured_pose_provider,
 )
+from .fsm import FsmError, FsmService, FsmSettings
 from .gravity import GravityFeedforward, default_model_path
 from .sdk_runtime import describe_crc_status, ensure_crc_libraries
 from .telemetry import TelemetryHub
@@ -37,7 +38,6 @@ else:
     logger.info("%s", describe_crc_status())
 
 AUDIO_DIR_NAME = "audio"
-TEXT_DIR_NAME = "text"
 
 
 @dataclass(frozen=True)
@@ -58,7 +58,14 @@ class RuntimeSettings:
     audio_enabled: bool = False
     gravity_compensation: bool = True
     lower_body_drift_deg: float = 5.0
-    hold_soak_s: float = 1.5
+    #: 沉降观察窗口。躯干前倾是延迟发展的，峰值出现在动作结束后约 2 秒，
+    #: 1.5 秒的窗口会漏掉峰值，所以默认 3 秒。
+    hold_soak_s: float = 3.0
+    #: 腰槽位的 motor_cmd.mode。0=不接管腰；1=诊断档（arm_sdk 名义上接管腰但
+    #: 增益为 0），用来在真机上判别 mode 语义，有让腰瘫掉的风险。
+    waist_slot_mode: int = 0
+    #: 允许切换的 FSM 运动模式，形如 "ai=ai,stand=stand"。留空表示切换能力关闭。
+    fsm_modes: str = ""
 
     @classmethod
     def from_env(cls) -> RuntimeSettings:
@@ -98,7 +105,9 @@ class RuntimeSettings:
             ).strip().lower()
             in {"1", "true", "yes", "on"},
             lower_body_drift_deg=float(os.getenv("ROBOT_GUI_LOWER_BODY_DRIFT_DEG", "5")),
-            hold_soak_s=float(os.getenv("ROBOT_GUI_HOLD_SOAK_S", "1.5")),
+            hold_soak_s=float(os.getenv("ROBOT_GUI_HOLD_SOAK_S", "3.0")),
+            waist_slot_mode=int(os.getenv("ROBOT_GUI_WAIST_SLOT_MODE", "0")),
+            fsm_modes=os.getenv("ROBOT_GUI_FSM_MODES", "").strip(),
         )
 
     def validate(self) -> None:
@@ -128,6 +137,10 @@ class RuntimeSettings:
                 raise ValueError("ROBOT_GUI_TRANSITION_SECONDS must be positive.")
             if not 0 < self.replay_speed <= 2.0:
                 raise ValueError("ROBOT_GUI_REPLAY_SPEED must be in (0, 2].")
+            if self.waist_slot_mode not in (0, 1):
+                raise ValueError(
+                    "ROBOT_GUI_WAIST_SLOT_MODE must be 0 (不接管腰) or 1 (诊断档)."
+                )
 
 
 def _error(code: str, message: str, status: int = 409) -> HTTPException:
@@ -174,12 +187,21 @@ def create_app(
             replay_speed=runtime_settings.replay_speed,
             lower_body_drift_deg=runtime_settings.lower_body_drift_deg,
             hold_soak_s=runtime_settings.hold_soak_s,
+            waist_slot_mode=runtime_settings.waist_slot_mode,
             gains=load_gains(runtime_settings.gains_path),
         ),
         telemetry=hub,
         action_store=store,
         audio_port=audio_port,
         feedforward=feedforward,
+    )
+    fsm = FsmService(
+        settings=FsmSettings.from_env(runtime_settings.fsm_modes),
+        adapter=adapter,
+        telemetry=hub,
+        controls_enabled=runtime_settings.controls_enabled,
+        control=control,
+        fsm_whitelist=runtime_settings.fsm_whitelist,
     )
 
     def snapshot() -> dict[str, Any]:
@@ -313,16 +335,15 @@ def create_app(
         confirmed = payload.get("confirmed") is True
         requested = payload.get("audio")
         explicit = isinstance(requested, str) and bool(requested)
-        # 未显式指定语音时，自动用与动作同名的 PCM，让讲解和手势一起播。
+        # 未显式指定语音时，自动用与动作同名的 PCM，让讲解和手势一起播；
+        # 找不到就安静地不播语音（不做 TTS 兜底）。
         audio_name = requested if explicit else action
         audio_pcm = _read_audio(store, audio_name, required=explicit)
-        audio_text = _read_text(store, audio_name) if explicit or audio_pcm is None else None
         try:
             return control.request_replay(
                 action,
                 confirmed=confirmed,
                 audio_pcm=audio_pcm,
-                audio_text=audio_text,
             )
         except ControlError as error:
             raise _error(error.code, str(error)) from error
@@ -330,6 +351,27 @@ def create_app(
     @app.post("/api/v1/control/release")
     async def release() -> dict[str, Any]:
         return control.release()
+
+    # ---- FSM 运动模式 ----
+
+    @app.get("/api/v1/fsm/state")
+    async def fsm_state() -> dict[str, Any]:
+        return fsm.state()
+
+    @app.post("/api/v1/fsm/mode")
+    async def fsm_mode(payload: dict[str, Any]) -> dict[str, Any]:
+        fsm_id = payload.get("fsm_id")
+        if not isinstance(fsm_id, int):
+            raise _error(
+                "fsm_mode_required",
+                "缺少要切换的模式 ID fsm_id。",
+                status=400,
+            )
+        confirmed = payload.get("confirmed") is True
+        try:
+            return fsm.request_mode(fsm_id, confirmed=confirmed)
+        except FsmError as error:
+            raise _error(error.code, str(error)) from error
 
     @app.websocket("/ws/control")
     async def control_stream(websocket: WebSocket) -> None:
@@ -342,17 +384,6 @@ def create_app(
             return
 
     return app
-
-
-def _read_text(store: ActionStore, name: str) -> str | None:
-    """从动作库目录的 text/ 子目录取同名讲解原文，供官方 TTS 兜底播报。"""
-    directory = store.data_dir
-    if directory is None:
-        return None
-    path = directory / TEXT_DIR_NAME / f"{name}.txt"
-    if not path.is_file():
-        return None
-    return path.read_text(encoding="utf-8").strip() or None
 
 
 def _read_audio(store: ActionStore, name: str, required: bool = False) -> bytes | None:

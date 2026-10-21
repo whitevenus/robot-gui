@@ -8,3 +8,5 @@ __pycache__/
 *.egg-info/
 *.tsbuildinfo
 tmp/
+# 设计预览稿是过程产物，不入库。
+design-previews/

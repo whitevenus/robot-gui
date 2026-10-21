@@ -1,0 +1,31 @@
+# 在此停止查找父目录中的 .editorconfig，确保本仓库使用自己的规则。
+root = true
+
+# 所有文件默认遵循以下规则；后面的文件类型配置可以覆盖它们。
+[*]
+# 文件统一使用 UTF-8 编码、LF 换行，并在末尾保留一个换行符。
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+# 默认使用 2 个空格缩进，不使用 Tab。
+indent_style = space
+indent_size = 2
+# 保存时移除行尾多余空格。
+trim_trailing_whitespace = true
+
+# Python 文件使用 4 个空格缩进。
+[*.py]
+indent_size = 4
+
+# Go 代码由 gofmt 统一格式化；使用 Tab 缩进，覆盖默认的 2 个空格。
+[*.go]
+indent_style = tab
+indent_size = tab
+
+# Windows 脚本使用 CRLF，与 .gitattributes 的行尾策略保持一致。
+[*.{bat,cmd,ps1}]
+end_of_line = crlf
+
+# Markdown 的两个行尾空格可表示换行，因此不自动删除。
+[*.md]
+trim_trailing_whitespace = false

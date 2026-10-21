@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from typing import Any, Callable, Protocol
 
 from .profile import G1_29DOF_JOINTS
@@ -19,6 +18,14 @@ class TelemetryAdapter(Protocol):
     ) -> None: ...
 
     def stop(self) -> None: ...
+
+    def switch_mode(self, fsm_id: int) -> tuple[int, str]:
+        """请求切换到指定 FSM ID 的模式。返回 (错误码, 补充说明)。"""
+        ...
+
+    def refresh_mode(self) -> dict[str, Any]:
+        """立刻回读当前 FSM 状态。"""
+        ...
 
 
 class UnitreeSdkTelemetryAdapter:
@@ -72,6 +79,8 @@ class UnitreeSdkTelemetryAdapter:
             ChannelSubscriber(self._topics["torso_imu"], IMUState_),
             self._on_secondary_imu,
         )
+        # LocoClient 这条 RPC 通道同时负责读 FSM（GetFsmId）和切 FSM（SetFsmId），
+        # 是官方《高层运动服务接口》指定的整机控制接口。初始化它不会改变机器人模式。
         self._loco_client = LocoClient()
         self._loco_client.SetTimeout(1.0)
         self._loco_client.Init()
@@ -174,6 +183,33 @@ class UnitreeSdkTelemetryAdapter:
                 logging.exception("Failed to poll the G1 FSM state.")
                 self._report_error("fsm", str(error))
             self._stop.wait(0.2)
+
+    # ---- FSM 模式切换 ----
+
+    def refresh_mode(self) -> dict[str, Any]:
+        """立刻回读当前 FSM 状态（切换后用来确认是否真的生效）。"""
+        fsm_id: int | None = None
+        try:
+            result, value = self._loco_client.GetFsmId()
+            if result == 0 and value is not None:
+                fsm_id = int(value)
+        except Exception:
+            logger.exception("回读 FSM ID 失败。")
+        return {"id": fsm_id}
+
+    def switch_mode(self, fsm_id: int) -> tuple[int, str]:
+        """请求切换到指定 FSM ID 的模式。返回 (错误码, 补充说明)。
+
+        官方《高层运动服务接口》的专家接口 `SetFsmId(int)`。注意它返回 0 只代表
+        内置运控接收了请求，真正的模式切换是否成功要看内置运控的状态切换逻辑，
+        所以调用方必须再回读一次 `GetFsmId()` 核对。
+        """
+        try:
+            code = self._loco_client.SetFsmId(int(fsm_id))
+        except Exception as error:
+            logger.exception("切换 FSM 模式失败：%s", fsm_id)
+            return -1, str(error)
+        return int(code), ""
 
     def _report_error(self, source: str, error: str) -> None:
         if self._publish_error is not None:

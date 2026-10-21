@@ -50,6 +50,37 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const FSM_MODES = [
+  {
+    fsm_id: 0,
+    label: "零力矩",
+    danger: true,
+    hint: "输出力矩恒为 0，机器人失去支撑，会瘫倒。",
+    allowed: false,
+  },
+  {
+    fsm_id: 1,
+    label: "阻尼",
+    danger: true,
+    hint: "只有速度阻尼，没有支撑力矩，同样会瘫倒。",
+    allowed: false,
+  },
+  {
+    fsm_id: 4,
+    label: "锁定站立",
+    danger: false,
+    hint: "纯弹簧-阻尼姿态保持，没有平衡控制，姿态偏了不会迈步救场。",
+    allowed: false,
+  },
+  {
+    fsm_id: 501,
+    label: "常规运控",
+    danger: false,
+    hint: "内置平衡控制生效。",
+    allowed: false,
+  },
+];
+
 function stubFetch(routes: Record<string, unknown>) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -67,7 +98,7 @@ function stubFetch(routes: Record<string, unknown>) {
 }
 
 beforeEach(() => {
-  // 动作工作台在挂载时就会拉取动作库与控制状态，默认给一个空实现，
+  // 动作工作台与运动模式面板在挂载时就会拉取状态，默认给一个空实现，
   // 避免每个用例都要重复准备 fetch 替身。
   stubFetch({
     "/api/v1/actions": { actions: [] },
@@ -79,24 +110,88 @@ beforeEach(() => {
       available: false,
       trajectory_duration_s: 0,
       audio_playing: false,
+      gravity_compensation: false,
+    },
+    "/api/v1/fsm/state": {
+      available: false,
+      reason: "未配置允许切换的模式（ROBOT_GUI_FSM_MODES）。",
+      current: { id: null, name: "" },
+      whitelist: [501],
+      modes: FSM_MODES,
     },
   });
 });
 
+function telemetrySnapshot(overrides: Record<string, unknown> = {}) {
+  return {
+    schema_version: "1.0",
+    mode: "real",
+    connection: {
+      state: "connected",
+      interface: "eth0",
+      last_data_at: "2026-10-19T07:00:00+00:00",
+      error: null,
+      message: "已收到 G1 LowState 遥测。",
+    },
+    sources: Object.fromEntries(
+      ["low_state", "bms", "hip_imu", "torso_imu", "fsm"].map((source) => [
+        source,
+        {
+          state: "fresh",
+          age_ms: 12,
+          fresh_for_ms: 300,
+          offline_after_ms: 1500,
+          error: null,
+        },
+      ]),
+    ),
+    robot: {
+      product_id: "g1",
+      variant: "29dof",
+      joint_count: 29,
+      mode_machine: 5,
+      joints: [],
+      bms: {
+        soc_pct: 92,
+        soh_pct: 100,
+        current_raw: 0,
+        voltage_raw: [50000, 50000, 50000],
+        temperature_raw: [25, 25],
+        cycle_count: 12,
+      },
+      hip_imu: { rpy: [0.001, 0.002, 0.003] },
+      torso_imu: { rpy: [0.004, 0.005, 0.006] },
+      fsm: { id: 501, mode: null },
+    },
+    capabilities: {
+      controls: { available: false, reason: "read_only" },
+    },
+    ...overrides,
+  };
+}
+
 describe("Real telemetry workstation", () => {
   it("requires real telemetry and keeps unopened hardware controls disabled", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
-    stubFetch({ "/api/v1/actions": { actions: [] } });
+    stubFetch({
+      "/api/v1/actions": { actions: [] },
+      "/api/v1/fsm/state": {
+        available: false,
+        reason: "未配置允许切换的模式（ROBOT_GUI_FSM_MODES）。",
+        current: { id: null, name: "" },
+        whitelist: [501],
+        modes: FSM_MODES,
+      },
+    });
 
     render(<App />);
 
     expect(screen.getByText("REAL · 等待连接")).toBeInTheDocument();
-    expect(screen.getByText(/仅接受真实 Unitree SDK2\/DDS 遥测/)).toBeInTheDocument();
     expect(
       screen.getByText(/以下能力本版仍未开放，按钮保持禁用/),
     ).toBeInTheDocument();
 
-    for (const label of ["FSM 模式切换", "键盘行走控制", "手掰示教"]) {
+    for (const label of ["键盘行走控制", "手掰示教"]) {
       expect(screen.getByRole("button", { name: new RegExp(label) })).toBeDisabled();
     }
   });
@@ -108,10 +203,11 @@ describe("Real telemetry workstation", () => {
         actions: [
           {
             name: "p1_s0",
-            group: "arms_waist",
-            frames: 357,
-            duration_s: 11.9,
-            source: "robot_gui",
+            group: "arms",
+            frames: 98,
+            duration_s: 4.9,
+            source: "echo-g",
+            has_audio: true,
           },
         ],
       },
@@ -123,17 +219,18 @@ describe("Real telemetry workstation", () => {
         available: false,
         trajectory_duration_s: 0,
         audio_playing: false,
+        gravity_compensation: false,
       },
     });
 
     render(<App />);
 
     expect(await screen.findByText("p1_s0")).toBeInTheDocument();
-    expect(screen.getByText("arms_waist")).toBeInTheDocument();
+    expect(screen.getByText("arms")).toBeInTheDocument();
     expect(
       screen.getByText(/真机控制未开启。设置 ROBOT_GUI_CONTROLS_ENABLED=1/),
     ).toBeInTheDocument();
-    const replay = screen.getAllByRole("button", { name: "回放" })[0];
+    const replay = screen.getByRole("button", { name: /确认并回放/ });
     expect(replay).toBeDisabled();
   });
 
@@ -146,45 +243,52 @@ describe("Real telemetry workstation", () => {
       socket.onopen?.();
       socket.onmessage?.(
         new MessageEvent("message", {
-          data: JSON.stringify({
-            schema_version: "1.0",
-            mode: "real",
-            connection: {
-              state: "connected",
-              interface: "eth0",
-              last_data_at: "2026-10-19T07:00:00+00:00",
-              error: null,
-              message: "已收到 G1 LowState 遥测。",
-            },
-            sources: {
-              low_state: {
-                state: "fresh",
-                age_ms: 12,
-                fresh_for_ms: 300,
-                offline_after_ms: 1500,
-              },
-            },
-            capabilities: {
-              controls: {
-                available: false,
-                reason: "telemetry_release_is_read_only",
-              },
-            },
-          }),
+          data: JSON.stringify(telemetrySnapshot()),
         }),
       );
     });
 
     expect(screen.getByText("已连接")).toBeInTheDocument();
+    expect(screen.getByText("Unitree SDK2 / eth0")).toBeInTheDocument();
     expect(
-      screen.getByText("Unitree SDK2 / DDS（eth0）"),
+      within(screen.getByRole("region", { name: "连接状态" })).getByText(/12 ms/),
     ).toBeInTheDocument();
+    expect(screen.getByText("已收到 G1 LowState 遥测。")).toBeInTheDocument();
+    expect(screen.getByText(/WebSocket 已连接/)).toBeInTheDocument();
+  });
+
+  it("translates the FSM id and mode name into a readable label", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<App />);
+    const socket = MockWebSocket.instances[0];
+
+    act(() => {
+      socket.onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify(telemetrySnapshot()),
+        }),
+      );
+    });
+
+    // 机器人自报模式名 "ai" → 页面显示「常规运控」并带上 FSM ID。
+    const strip = screen.getByRole("region", { name: "连接状态" });
+    expect(await within(strip).findByText("常规运控")).toBeInTheDocument();
+    expect(within(strip).getByText("FSM 501")).toBeInTheDocument();
+    expect(within(strip).getByText("白名单允许回放")).toBeInTheDocument();
+  });
+
+  it("shows why mode switching is unavailable instead of dead buttons", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<App />);
+
     expect(
-      within(screen.getByRole("region", { name: "连接状态" })).getByText(
-        /\s12 ms/,
-      ),
+      await screen.findByText(/模式切换未开放：未配置允许切换的模式/),
     ).toBeInTheDocument();
-    expect(screen.getAllByText("已收到 G1 LowState 遥测。")).toHaveLength(2);
+    for (const label of ["零力矩", "阻尼", "锁定站立", "常规运控"]) {
+      expect(
+        screen.getByRole("button", { name: new RegExp(`^${label}`) }),
+      ).toBeDisabled();
+    }
   });
 
   it("rejects snapshots from a non-real runtime", () => {
@@ -222,31 +326,7 @@ describe("Real telemetry workstation", () => {
       socket.onopen?.();
       socket.onmessage?.(
         new MessageEvent("message", {
-          data: JSON.stringify({
-            schema_version: "1.0",
-            mode: "real",
-            connection: {
-              state: "connected",
-              interface: "eth0",
-              last_data_at: "2026-10-19T07:00:00+00:00",
-              error: null,
-              message: "已收到 G1 LowState 遥测。",
-            },
-            sources: {
-              low_state: {
-                state: "fresh",
-                age_ms: 12,
-                fresh_for_ms: 300,
-                offline_after_ms: 1500,
-              },
-            },
-            capabilities: {
-              controls: {
-                available: false,
-                reason: "telemetry_release_is_read_only",
-              },
-            },
-          }),
+          data: JSON.stringify(telemetrySnapshot()),
         }),
       );
     });
@@ -256,42 +336,54 @@ describe("Real telemetry workstation", () => {
       vi.advanceTimersByTime(500);
     });
 
-    expect(screen.getByText("WebSocket 未连接")).toBeInTheDocument();
+    expect(screen.getByText(/WebSocket 未连接/)).toBeInTheDocument();
     expect(
       within(screen.getByRole("region", { name: "连接状态" })).getByText(
-        /\s512 ms/,
+        /512 ms/,
       ),
     ).toBeInTheDocument();
-    const sourceHealth = screen.getByRole("region", {
-      name: "数据来源状态",
-    });
-    expect(within(sourceHealth).getByText("延迟")).toBeInTheDocument();
-    expect(within(sourceHealth).getByText("512 ms")).toBeInTheDocument();
     expect(screen.getByText("数据延迟")).toBeInTheDocument();
+    const summary = screen.getByRole("region", { name: "遥测摘要" });
+    expect(within(summary).getAllByText("延迟").length).toBeGreaterThan(0);
+    expect(within(summary).getAllByText("512 ms").length).toBeGreaterThan(0);
     expect(
-      screen.getByText("Pose: delayed/unknown · 512/— ms · 0 joints"),
+      screen.getByText("Pose: delayed/delayed · 512/512 ms · 0 joints"),
     ).toBeInTheDocument();
 
     act(() => {
       vi.advanceTimersByTime(1000);
     });
 
-    expect(within(sourceHealth).getByText("离线")).toBeInTheDocument();
+    expect(within(summary).getAllByText("离线").length).toBeGreaterThan(0);
     expect(screen.getByText("未连接")).toBeInTheDocument();
     expect(
-      screen.getByText("Pose: offline/unknown · 1512/— ms · 0 joints"),
+      screen.getByText("Pose: offline/offline · 1512/1512 ms · 0 joints"),
     ).toBeInTheDocument();
   });
 
-  it("renders all semantic joint rows and auxiliary telemetry from the schema", async () => {
+  it("renders joint rows grouped by body part and only shows the upper body by default", async () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<App />);
     const socket = MockWebSocket.instances[0];
-    const joints = Array.from({ length: 29 }, (_, sdk_slot) => ({
+    const groups = [
+      ...Array.from({ length: 12 }, () => "leg"),
+      ...Array.from({ length: 3 }, () => "waist"),
+      ...Array.from({ length: 14 }, () => "arm"),
+    ];
+    const joints = groups.map((group, sdk_slot) => ({
       name: `joint_${sdk_slot}`,
       urdf_joint_name: `joint_${sdk_slot}_joint`,
       sdk_slot,
-      group: "test_group",
+      group:
+        group === "leg"
+          ? sdk_slot < 6
+            ? "left_leg"
+            : "right_leg"
+          : group === "waist"
+            ? "waist"
+            : sdk_slot < 18
+              ? "left_arm"
+              : "right_arm",
       q_rad: 0.25,
       dq_rad_s: 0.5,
       ddq_rad_s2: 0.75,
@@ -305,52 +397,14 @@ describe("Real telemetry workstation", () => {
     act(() => {
       socket.onmessage?.(
         new MessageEvent("message", {
-          data: JSON.stringify({
-            schema_version: "1.0",
-            mode: "real",
-            connection: {
-              state: "connected",
-              interface: "eth0",
-              last_data_at: "2026-10-19T07:00:00+00:00",
-              error: null,
-              message: "Real telemetry.",
-            },
-            sources: Object.fromEntries(
-              ["low_state", "bms", "hip_imu", "torso_imu", "fsm"].map(
-                (source) => [
-                  source,
-                  {
-                    state: "fresh",
-                    age_ms: 5,
-                    fresh_for_ms: 300,
-                    offline_after_ms: 1500,
-                    error: null,
-                  },
-                ],
-              ),
-            ),
-            robot: {
-              product_id: "g1",
-              variant: "29dof",
-              joint_count: 29,
-              mode_machine: 2,
-              joints,
-              bms: {
-                soc_pct: 92,
-                soh_pct: 100,
-                current_raw: 0,
-                voltage_raw: [50000, 50000, 50000],
-                temperature_raw: [25, 25],
-                cycle_count: 12,
+          data: JSON.stringify(
+            telemetrySnapshot({
+              robot: {
+                ...telemetrySnapshot().robot,
+                joints,
               },
-              hip_imu: { rpy: [0, 0, 0] },
-              torso_imu: { rpy: [0, 0, 0] },
-              fsm: { id: 500, mode: null },
-            },
-            capabilities: {
-              controls: { available: false, reason: "read_only" },
-            },
-          }),
+            }),
+          ),
         }),
       );
     });
@@ -358,19 +412,48 @@ describe("Real telemetry workstation", () => {
     const jointRegion = screen.getByRole("region", {
       name: "G1 29DoF 关节遥测",
     });
-    expect(within(jointRegion).getAllByRole("row")).toHaveLength(30);
-    expect(screen.getByText("joint_0")).toBeInTheDocument();
-    expect(screen.getByText("joint_28")).toBeInTheDocument();
-    expect(screen.getByText("92")).toBeInTheDocument();
-    expect(screen.getByText("SOH 100%")).toBeInTheDocument();
-    expect(screen.getByText("500")).toBeInTheDocument();
-    expect(screen.getAllByText("0.000, 0.000, 0.000")).toHaveLength(2);
-    expect(screen.getByText("模式：unknown")).toBeInTheDocument();
+    // 默认只看上肢：腰 3 + 双臂 14 = 17 行，加上 3 个分组表头和 1 行折叠的腿。
+    expect(within(jointRegion).getAllByRole("row")).toHaveLength(1 + 3 + 17 + 1);
+    expect(within(jointRegion).getByText("腰部")).toBeInTheDocument();
+    expect(within(jointRegion).getByText("左臂")).toBeInTheDocument();
+    expect(within(jointRegion).getByText("右臂")).toBeInTheDocument();
+    expect(within(jointRegion).queryByText("joint_0")).not.toBeInTheDocument();
     expect(
-      await screen.findByText("Pose: fresh/fresh · 5/5 ms · 29 joints"),
+      within(jointRegion).getByText(/左腿 \/ 右腿 · 12 关节已折叠/),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("region", { name: "G1 三维姿态模型" }),
-    ).toHaveAttribute("data-mode-machine", "2");
+      screen.getByText("另有 12 个腿部关节已折叠，点「只看上肢」展开。"),
+    ).toBeInTheDocument();
+
+    // 切到「全部」后腿部行出现。
+    act(() => {
+      screen.getByRole("button", { name: /只看上肢/ }).click();
+    });
+    expect(within(jointRegion).getByText("joint_0")).toBeInTheDocument();
+    expect(within(jointRegion).getAllByRole("row")).toHaveLength(1 + 5 + 29);
+  });
+
+  it("renders auxiliary telemetry with readable vectors and drops raw noise", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<App />);
+    const socket = MockWebSocket.instances[0];
+
+    act(() => {
+      socket.onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify(telemetrySnapshot()),
+        }),
+      );
+    });
+
+    const summary = screen.getByRole("region", { name: "遥测摘要" });
+    expect(within(summary).getByText(/92% SOC · SOH 100%/)).toBeInTheDocument();
+    expect(within(summary).getByText("R 0.001 / P 0.002 / Y 0.003")).toBeInTheDocument();
+    expect(within(summary).getByText("R 0.004 / P 0.005 / Y 0.006")).toBeInTheDocument();
+    // 原始计数（电压 / 电流）不再直接露出。
+    expect(screen.queryByText(/50000/)).not.toBeInTheDocument();
+    expect(
+      await screen.findByText("Pose: fresh/fresh · 12/12 ms · 0 joints"),
+    ).toBeInTheDocument();
   });
 });

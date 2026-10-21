@@ -41,6 +41,27 @@ G1_29DOF_JOINTS = (
     JointDescriptor("right_wrist_yaw", "right_wrist_yaw_joint", 28, "right_arm"),
 )
 
+#: 本工作台的接管范围：**只接管双臂**。
+#: 腿（slot 0-11）与腰（slot 12-14）都不下发，由机器人内置运控负责 ——
+#: arm_sdk 一旦接管腰，内置的腰部平衡回路就退让，躯干会前倾
+#: （2026-10-20 真机实测：腰 14 从 -1.49° 前倾到 +10.01°，动作结束后仍在恶化）。
+ARM_GROUPS = ("left_arm", "right_arm")
+#: 下盘 = 腿 + 腰，漂移守卫只看这一组；手臂在动作里本来就在动，不算漂移。
+LOWER_BODY_GROUPS = ("left_leg", "right_leg", "waist")
+
+#: 被接管的 SDK 槽位（双臂 14 个）。
+ARM_SDK_SLOTS: tuple[int, ...] = tuple(
+    joint.sdk_slot for joint in G1_29DOF_JOINTS if joint.group in ARM_GROUPS
+)
+#: 不接管的腰部槽位。
+WAIST_SDK_SLOTS: tuple[int, ...] = tuple(
+    joint.sdk_slot for joint in G1_29DOF_JOINTS if joint.group == "waist"
+)
+#: 漂移守卫关注的关节名（腿 + 腰）。
+LOWER_BODY_JOINT_NAMES: frozenset[str] = frozenset(
+    joint.name for joint in G1_29DOF_JOINTS if joint.group in LOWER_BODY_GROUPS
+)
+
 if len(G1_29DOF_JOINTS) != 29:
     raise RuntimeError("G1 29DoF profile must define exactly 29 joints.")
 if len({joint.name for joint in G1_29DOF_JOINTS}) != 29:

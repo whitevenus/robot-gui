@@ -1,10 +1,14 @@
-"""真机控制会话：接管上肢、播放动作、返回基线、交还控制权。
+"""真机控制会话：接管双臂、播放动作、返回基线、交还控制权。
 
 控制链路复用 g1-action-studio 的模块（不是它的 CLI）：
   - RobotSession  负责 rt/arm_sdk 的 LowCmd 发送、weight 0→1→0 的接管与交还、
                   以及异常路径上的降权重（这正是 2026-10-16 事故复盘里修好的两条）
   - plan_sequence 负责「从当前实测姿态 → 动作首帧 → 动作 → 返回基线」的连续轨迹，
                   并在发送任何控制命令之前对整条样条做关节限位与自碰撞判定
+
+**接管范围只有双臂（14 关节）。** 腰（slot 12-14）和腿（slot 0-11）都不下发，
+由机器人内置运控负责：arm_sdk 一旦接管腰，内置的腰部平衡回路就退让，躯干会前倾
+（2026-10-20 真机实测：腰 14 从 -1.49° 前倾到 +10.01°，动作结束后仍在恶化）。
 
 顺序是刻意的：先在只读状态下规划并校验，规划失败就一个控制命令都不发；
 规划通过后才 acquire()（创建 rt/arm_sdk 发布器）并播放。
@@ -31,17 +35,23 @@ from g1_action_studio.robot import RobotSession
 from .actions import ActionStore, ActionStoreError
 from .audio import G1AudioPort, pcm_duration_s
 from .gravity import GravityFeedforward, install_gravity_command_builder
+from .profile import LOWER_BODY_JOINT_NAMES
 
 logger = logging.getLogger(__name__)
 
-# 与 g1-action-studio 的示例增益一致：保持阶段 kp/kd = 60/1.5。
+#: 本工作台只接管双臂（14 关节）。腰与腿都不下发，由机器人内置运控负责。
+ARM_JOINT_COUNT = 14
+
+#: 与 g1-action-studio 的示例增益一致：保持阶段 kp/kd = 60/1.5。
 DEFAULT_GAINS: dict[str, dict[str, float]] = {
     "arms": {"hold_kp": 60.0, "hold_kd": 1.5, "teach_kp": 20.0, "teach_kd": 1.5},
-    "waist": {"hold_kp": 60.0, "hold_kd": 1.5, "teach_kp": 20.0, "teach_kd": 1.5},
+    # 腰不接管。waist 组只是为了满足 studio 的增益结构（它按 arms/waist 两组拼 17 维），
+    # 腰的槽位根本不会下发，这里的值不产生任何作用。
+    "waist": {"hold_kp": 0.0, "hold_kd": 0.0, "teach_kp": 0.0, "teach_kd": 0.0},
 }
 
-# 官方接口下 12-28 槽位为腰部和上肢电机参数，29.q 为 0-1 权重；
-# 腿部 0-11 由内置运控负责，本工作台不接管。
+#: 官方接口下 12-28 槽位为腰部和上肢电机参数，29.q 为 0-1 权重；
+#: 腿部 0-11 由内置运控负责，本工作台不接管；腰部 12-14 同样不接管。
 UPPER_JOINT_COUNT = 17
 
 
@@ -68,7 +78,12 @@ class ControlSettings:
     transition_seconds: float = 2.0
     replay_speed: float = 1.0
     lower_body_drift_deg: float = 5.0
-    hold_soak_s: float = 1.5
+    #: 动作结束后的沉降观察窗口。前倾是延迟发展的：实测峰值出现在动作结束后约 2 秒
+    #: （轨迹 8.9 秒，腰 14 峰值 t=10.86s），1.5 秒的窗口会漏掉峰值。
+    hold_soak_s: float = 3.0
+    #: 腰槽位写入的 motor_cmd.mode。0=不接管腰（默认）；1=诊断档，arm_sdk 名义上
+    #: 接管腰但增益仍为 0，用来在真机上判别 mode 语义。1 有让腰瘫掉的风险。
+    waist_slot_mode: int = 0
     gains: dict[str, dict[str, float]] | None = None
 
     def validate(self) -> None:
@@ -79,12 +94,13 @@ class ControlSettings:
 
 
 class TrackingMonitor:
-    """逐关节跟踪误差监视。
+    """逐关节跟踪误差监视（只看被接管的双臂 14 关节）。
 
     上肢"下垂"有两种完全不同的原因，动作本身低垂，或者关节没跟上目标。
     这里在回放期间同时记录命令目标角与实测角，按关节给出最大偏差和均值，
-    一次回放就能分辨是哪一种，也能看出哪些槽位根本没被响应
-    （例如腰被锁住时，waist_* 的目标在变而实测不动）。
+    一次回放就能分辨是哪一种。
+
+    腰不在其中：腰不由我们驱动，它的目标角在轨迹里只是占位，拿它跟实测比没有意义。
     """
 
     def __init__(self, joint_names: tuple[str, ...]) -> None:
@@ -125,27 +141,36 @@ class TrackingMonitor:
 class LowerBodyMonitor:
     """下盘（腿 + 腰）漂移守卫。
 
+    **只看腿（slot 0-11）与腰（slot 12-14），手臂不参与判定。**
+    手臂在动作里本来就要大幅运动，把它算进漂移基线只会让守卫每次都误报
+    （2026-10-20 真机实测：把手臂算进去后最大漂移 77.11° @right_wrist_roll，
+    而真实腰 14 漂移只有 0.17°，远在 5° 阈值内）。
+
     躯干前倾要看**腰 14 的关节角**，不能用 IMU 判：IMU 装在骨盆上，
     腰倒 23° 时 IMU pitch 只变 2.4°，根本反映不出来。
-
-    参考实现（demo1/fk/g1_arm.py，2026-09-29 实机）的实测结论：
-      完全不锁腰 → 腰 14 最大前倾 +28.5°，膝偏移 46°，腿来回摆
-      锁"实测角"（软锁，目标跟着测量走，位置误差恒 0）→ 腰倒到 ~12°
-      锁"定值" + kp=120 → 才真正提供保持直立的回正力矩
 
     漂移是**延迟**出现的：手臂停住后平衡控制器才慢慢挪腰/腿，约 1 秒量级，
     而且发生在整条计划跑完之后，只看动作期间的同步检查永远抓不到。
     """
 
-    def __init__(self, threshold_deg: float = 5.0) -> None:
+    def __init__(
+        self,
+        threshold_deg: float = 5.0,
+        joint_names: frozenset[str] = LOWER_BODY_JOINT_NAMES,
+    ) -> None:
         self._threshold = threshold_deg
+        self._joint_names = joint_names
         self._baseline: dict[str, float] = {}
         self._max_drift = 0.0
         self._max_joint = ""
         self._waist_pitch_drift = 0.0
 
     def capture_baseline(self, angles: dict[str, float]) -> None:
-        self._baseline = dict(angles)
+        self._baseline = {
+            name: value
+            for name, value in angles.items()
+            if name in self._joint_names
+        }
         self._max_drift = 0.0
         self._max_joint = ""
         self._waist_pitch_drift = 0.0
@@ -155,7 +180,10 @@ class LowerBodyMonitor:
             return 0.0
         worst = 0.0
         worst_joint = ""
-        for name, baseline in self._baseline.items():
+        for name in self._joint_names:
+            baseline = self._baseline.get(name)
+            if baseline is None:
+                continue
             value = angles.get(name)
             if value is None:
                 continue
@@ -216,8 +244,9 @@ class ControlService:
         self._trajectory_duration = 0.0
         self._tracking: dict[str, Any] = {}
         self._lower_body: dict[str, Any] = {}
-        if feedforward is not None:
-            install_gravity_command_builder(feedforward)
+        # 必须无条件安装：补丁同时负责"只接管双臂"和重力前馈。
+        # 关掉重力前馈时不装它，就会退回 studio 原版 build_command 把腰一起接管。
+        install_gravity_command_builder(feedforward, self._settings.waist_slot_mode)
 
     # ---- 状态 ----
 
@@ -236,22 +265,18 @@ class ControlService:
                 "lower_body": self._lower_body,
             }
 
-    def _measured_upper(self) -> np.ndarray | None:
-        """当前实测的上肢 17 维关节角（studio 顺序：左臂 7 + 右臂 7 + 腰 3）。"""
-        from g1_action_studio.model import UPPER_JOINTS
-
+    def _measured_arms(self) -> np.ndarray | None:
+        """当前实测的双臂 14 维关节角（studio 顺序：左臂 7 + 右臂 7）。"""
         angles = self._telemetry.latest_joint_angles()
         if not angles:
             return None
         try:
-            upper = np.array(
-                [angles[name.replace("_joint", "")] for name in UPPER_JOINTS]
-            )
+            arms = np.array([angles[name] for name in arm_joint_names()])
         except KeyError:
             return None
-        if not np.isfinite(upper).all():
+        if not np.isfinite(arms).all():
             return None
-        return upper
+        return arms
 
     def _measured_named(self) -> dict[str, float]:
         return self._telemetry.latest_joint_angles() or {}
@@ -275,8 +300,10 @@ class ControlService:
                     return
             else:
                 target, _ = trajectory.sample(elapsed)
-                measured = self._measured_upper()
-                monitor.update(np.asarray(target, dtype=float), measured)
+                # studio 的 upper_q 顺序是双臂在前、腰在后，只取前 14 位与实测对齐。
+                arms_target = np.asarray(target, dtype=float)[:ARM_JOINT_COUNT]
+                measured = self._measured_arms()
+                monitor.update(arms_target, measured)
                 lower.update(self._measured_named())
             cancel.wait(0.02)
 
@@ -319,9 +346,16 @@ class ControlService:
                 f"FSM {fsm_id} 不在允许列表 {list(self._settings.fsm_whitelist)} 中。",
             )
         try:
-            return self._store.load(action_name)
+            action = self._store.load(action_name)
         except ActionStoreError as error:
             raise ControlError(error.code, str(error)) from error
+        if action.group != "arms":
+            raise ControlError(
+                "action_group_unsupported",
+                f"动作组 {action.group} 不被接管：本工作台只接管双臂（arms 组 14 维），"
+                "腰与腿由机器人内置运控负责。",
+            )
+        return action
 
     # ---- 控制 ----
 
@@ -331,7 +365,6 @@ class ControlService:
         *,
         confirmed: bool,
         audio_pcm: bytes | None = None,
-        audio_text: str | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if self._worker is not None and self._worker.is_alive():
@@ -341,7 +374,7 @@ class ControlService:
         self._set_phase(ControlPhase.PLANNING, f"正在规划 {action_name}")
         worker = threading.Thread(
             target=self._run,
-            args=(action, audio_pcm, audio_text),
+            args=(action, audio_pcm),
             name="robot-gui-control",
             daemon=False,
         )
@@ -373,16 +406,18 @@ class ControlService:
         self,
         action: Action,
         audio_pcm: bytes | None,
-        audio_text: str | None,
     ) -> None:
         cancel = self._cancel
         session: RobotSession | None = None
         audio_thread: threading.Thread | None = None
         try:
             self._set_phase(ControlPhase.PLANNING, "等待机器人反馈")
+            gains = dict(self._settings.gains or DEFAULT_GAINS)
+            # 腰不接管：即使配置里还留着 waist 组也一律作废，免得以后误以为腰受控。
+            gains["waist"] = dict(DEFAULT_GAINS["waist"])
             with RobotSession(
                 self._settings.interface,
-                self._settings.gains or DEFAULT_GAINS,
+                gains,
                 cancel,
             ) as session:
                 start: StartPose = session.start_pose
@@ -402,15 +437,15 @@ class ControlService:
                 )
                 with self._lock:
                     self._trajectory_duration = float(trajectory.duration)
-                self._set_phase(ControlPhase.ACQUIRING, "接管上肢控制权")
+                self._set_phase(ControlPhase.ACQUIRING, "接管双臂控制权")
                 session.acquire()
-                if (audio_pcm or audio_text) and self._audio is not None:
-                    audio_thread = self._start_audio(audio_pcm, audio_text, cancel)
+                if audio_pcm and self._audio is not None:
+                    audio_thread = self._start_audio(audio_pcm, cancel)
                 self._set_phase(
                     ControlPhase.PLAYING,
                     f"回放 {action.group}，轨迹 {trajectory.duration:.1f} 秒",
                 )
-                monitor = TrackingMonitor(upper_joint_names())
+                monitor = TrackingMonitor(arm_joint_names())
                 lower = LowerBodyMonitor(self._settings.lower_body_drift_deg)
                 lower.capture_baseline(self._measured_named())
                 monitor_thread = threading.Thread(
@@ -459,45 +494,37 @@ class ControlService:
 
     def _start_audio(
         self,
-        pcm: bytes | None,
-        text: str | None,
+        pcm: bytes,
         cancel: threading.Event,
     ) -> threading.Thread:
         """让讲解语音与动作本体对齐：过渡段结束后再起播。
 
-        优先用课程包原声的 PCM 推流（保真讲师音色）；推流不可用时退回官方 TTS
-        播原文（参考实现 g1-voice-command 在真机上验证过的路径）。
+        **只走课程包原声的 PCM 推流，不做 TTS 兜底。** 兜底播的是云端合成的另一套
+        音色，和课程包对不上；讲不出原声就不出声，比出个错的音色好。
         """
         assert self._audio is not None
 
         def worker() -> None:
             if cancel.wait(self._settings.transition_seconds):
                 return
-            if pcm:
-                error = self._audio.play(pcm, cancel)
-                if not error:
-                    logger.info("讲解语音播放完成（PCM 推流 %.2f 秒）", pcm_duration_s(pcm))
-                    return
-                logger.warning("PCM 推流失败（%s），改用官方 TTS 播原文", error)
-            if text:
-                error = self._audio.speak(text)
-                if error:
-                    logger.warning("官方 TTS 播报失败：%s", error)
-                else:
-                    logger.info("讲解语音已用官方 TTS 播报（%d 字）", len(text))
-            else:
-                logger.warning("没有可用的讲解语音：既无 PCM 也无原文")
+            error = self._audio.play(pcm, cancel)
+            if error:
+                logger.warning("PCM 推流失败（%s）", error)
+                return
+            logger.info("讲解语音播放完成（PCM 推流 %.2f 秒）", pcm_duration_s(pcm))
 
         thread = threading.Thread(target=worker, name="robot-gui-audio", daemon=True)
         thread.start()
         return thread
 
 
-def upper_joint_names() -> tuple[str, ...]:
-    """上肢 17 关节名（studio 顺序），给跟踪误差报表用。"""
-    from g1_action_studio.model import UPPER_JOINTS
+def arm_joint_names() -> tuple[str, ...]:
+    """被接管的双臂 14 关节名（studio 顺序：左臂 7 + 右臂 7）。"""
+    from g1_action_studio.model import GROUPS, UPPER_JOINTS
 
-    return tuple(name.replace("_joint", "") for name in UPPER_JOINTS)
+    return tuple(
+        UPPER_JOINTS[index].replace("_joint", "") for index in GROUPS["arms"]
+    )
 
 
 def measured_pose_provider(hub: Any):
@@ -521,14 +548,21 @@ def measured_pose_provider(hub: Any):
 
 
 def load_gains(path: Path | None) -> dict[str, dict[str, float]] | None:
-    """从 JSON 读增益配置；缺省时用内置的 hold 60/1.5。"""
+    """从 JSON 读增益配置；缺省时用内置的 hold 60/1.5。
+
+    只接管双臂，所以只要求 arms 一组。waist 组是接管范围收窄之前的遗留，
+    填了也不生效（腰的槽位不会下发），留着只是为了兼容旧的配置文件。
+    """
     if path is None:
         return None
     import json
 
     raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict) or set(raw) != {"arms", "waist"}:
-        raise ValueError("增益配置必须且只能包含 arms 与 waist 两组")
+    if not isinstance(raw, dict) or "arms" not in raw:
+        raise ValueError("增益配置必须包含 arms 组")
+    unknown = set(raw) - {"arms", "waist"}
+    if unknown:
+        raise ValueError(f"增益配置含未知分组：{', '.join(sorted(unknown))}")
     for group, values in raw.items():
         if not isinstance(values, dict) or set(values) != {
             "hold_kp", "hold_kd", "teach_kp", "teach_kd"

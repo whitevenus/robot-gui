@@ -219,6 +219,8 @@ class TelemetryHub:
                     None
                     if fsm_data is None
                     else {
+                        # 官方只用数字 ID 表示模式（见《高层运动服务接口》模式 ID 表），
+                        # 页面按那张表翻译成中文标签。
                         "id": fsm_data.get("id"),
                         "mode": fsm_data.get("mode"),
                     }

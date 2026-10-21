@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { readError } from "./api";
+
 interface ActionSummary {
   name: string;
   group: string;
@@ -28,19 +30,6 @@ const PHASE_LABELS: Record<string, string> = {
   releasing: "交还控制权",
   fault: "故障",
 };
-
-async function readError(response: Response): Promise<string> {
-  try {
-    const body = await response.json();
-    const detail = body?.detail;
-    if (detail && typeof detail === "object") {
-      return `${detail.code ?? "error"}：${detail.reason ?? ""}`.trim();
-    }
-    return JSON.stringify(detail ?? body);
-  } catch {
-    return `请求失败（HTTP ${response.status}）`;
-  }
-}
 
 export function ActionWorkbench() {
   const [actions, setActions] = useState<ActionSummary[]>([]);
@@ -128,6 +117,7 @@ export function ActionWorkbench() {
         return;
       }
       setMessage(`已删除动作 ${name}`);
+      if (selected === name) setSelected("");
       await refreshActions();
     } finally {
       setBusy(false);
@@ -179,146 +169,131 @@ export function ActionWorkbench() {
   }
 
   const available = state?.available === true;
+  const selectedAction = actions.find((item) => item.name === selected) ?? null;
 
   return (
-    <section className="action-panel" aria-label="动作库与真机回放">
-      <div className="section-heading">
-        <div>
-          <p className="eyebrow">ACTION LIBRARY</p>
-          <h2>动作库与真机回放</h2>
-        </div>
-        <span>
+    <section className="rail-section" id="action-panel" aria-label="动作库与真机回放">
+      <div className="rail-section-head">
+        <h2>动作库与真机回放</h2>
+        <span className="rail-current">
           {state ? PHASE_LABELS[state.phase] ?? state.phase : "读取控制状态"}
           {state?.action ? ` · ${state.action}` : ""}
         </span>
       </div>
 
       {!available && (
-        <p className="disabled-explanation">
+        <p className="rail-reason">
           真机控制未开启。设置 ROBOT_GUI_CONTROLS_ENABLED=1 并确认现场安全后，才会接受回放请求。
         </p>
       )}
       {state?.phase === "fault" && state.error_code && (
-        <p className="source-error">控制会话失败：{state.error_code} {state.message}</p>
+        <p className="rail-error">控制会话失败：{state.error_code} {state.message}</p>
       )}
-      {state && (
-        <p className="action-flags">
-          重力补偿：{state.gravity_compensation ? "开" : "关"}
-          {state.gravity_compensation
-            ? "（上肢力矩按实测姿态前馈，抵消 PD 扛重力造成的下垂）"
-            : "（未开启，上肢前伸会明显下垂）"}
-        </p>
-      )}
-      {message && <p className="action-message">{message}</p>}
+      {message && <p className="rail-error">{message}</p>}
 
-      <div className="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>动作</th>
-              <th>关节组</th>
-              <th>帧数</th>
-              <th>时长 (s)</th>
-              <th>来源</th>
-              <th>语音</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {actions.map((action) => (
-              <tr key={action.name}>
-                <th scope="row">{action.name}</th>
-                <td>{action.group}</td>
-                <td>{action.frames}</td>
-                <td>{action.duration_s.toFixed(2)}</td>
-                <td>{action.source}</td>
-                <td>{action.has_audio ? "有" : "无"}</td>
-                <td className="action-cell">
-                  <button
-                    type="button"
-                    disabled={!available || busyControl || busy}
-                    onClick={() => void runReplay(action.name, action.has_audio)}
-                  >
-                    回放
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void runDelete(action.name)}
-                  >
-                    删除
-                  </button>
-                  <a href={`/api/v1/actions/${encodeURIComponent(action.name)}`}>导出</a>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="act-list">
+        {actions.map((action) => {
+          const isSelected = action.name === selected;
+          return (
+            <div
+              key={action.name}
+              className={`act-row${isSelected ? " selected" : ""}`}
+            >
+              <button
+                type="button"
+                className="act-pick"
+                onClick={() => setSelected(action.name)}
+                aria-pressed={isSelected}
+              >
+                <strong>{action.name}</strong>
+                <span className="act-meta">
+                  <span className="act-group">{action.group}</span>
+                  {action.frames} 帧 · {action.duration_s.toFixed(1)} s
+                </span>
+              </button>
+              <span className="act-tags">
+                {action.has_audio && <span className="tag teal">语音</span>}
+                <button
+                  type="button"
+                  className="link-button"
+                  disabled={busy}
+                  onClick={() => void runDelete(action.name)}
+                >
+                  删除
+                </button>
+                <a href={`/api/v1/actions/${encodeURIComponent(action.name)}`}>导出</a>
+              </span>
+            </div>
+          );
+        })}
         {actions.length === 0 && (
-          <p className="empty-state">
+          <p className="rail-reason">
             动作库为空。导入 g1-action-studio 兼容的 group+frames JSON，或用 ECHO-G
             转出的上肢轨迹。
           </p>
         )}
       </div>
 
-      <div className="action-import">
-        <label htmlFor="action-name">动作名</label>
-        <input
-          id="action-name"
-          value={importName}
-          placeholder="例如 p1_s0"
-          onChange={(event) => setImportName(event.target.value)}
-        />
-        <label htmlFor="action-body">动作 JSON</label>
-        <textarea
-          id="action-body"
-          value={importBody}
-          rows={5}
-          placeholder='{"group": "arms_waist", "frames": [{"t": 0, "q": [ ... 17 项 ... ]}]}'
-          onChange={(event) => setImportBody(event.target.value)}
-        />
-        <button
-          type="button"
-          disabled={busy || !importName.trim() || !importBody.trim()}
-          onClick={() => void runImport()}
-        >
-          导入动作
-        </button>
-      </div>
+      <button
+        type="button"
+        className="btn btn-primary"
+        disabled={!available || busyControl || busy || !selectedAction}
+        onClick={() => {
+          if (!selectedAction) return;
+          void runReplay(selectedAction.name, selectedAction.has_audio);
+        }}
+      >
+        {selectedAction ? `确认并回放 ${selectedAction.name}` : "确认并回放"}
+      </button>
+      <button
+        type="button"
+        className="btn btn-ghost"
+        disabled={!busyControl}
+        onClick={() => void runRelease()}
+      >
+        停止并交还控制权
+      </button>
 
-      <div className="action-footer">
-        <label htmlFor="action-select">选择要回放的动作</label>
-        <select
-          id="action-select"
-          value={selected}
-          onChange={(event) => setSelected(event.target.value)}
-        >
-          <option value="">— 请选择 —</option>
-          {actions.map((action) => (
-            <option key={action.name} value={action.name}>
-              {action.name}（{action.group} · {action.duration_s.toFixed(1)}s）
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          disabled={!available || busyControl || busy || !selected}
-          onClick={() => {
-            const target = actions.find((item) => item.name === selected);
-            void runReplay(selected, target?.has_audio ?? false);
-          }}
-        >
-          确认并回放
-        </button>
-        <button
-          type="button"
-          disabled={!busyControl}
-          onClick={() => void runRelease()}
-        >
-          停止并交还控制权
-        </button>
-      </div>
+      {state && (
+        <div className="rail-flags">
+          <div>
+            <span>重力补偿</span>
+            <b>{state.gravity_compensation ? "开" : "关"}</b>
+          </div>
+          <div>
+            <span>执行范围</span>
+            <b>双臂 14 维</b>
+          </div>
+        </div>
+      )}
+
+      <details className="rail-details">
+        <summary>导入动作 JSON</summary>
+        <div className="action-import">
+          <label htmlFor="action-name">动作名</label>
+          <input
+            id="action-name"
+            value={importName}
+            placeholder="例如 p1_s0"
+            onChange={(event) => setImportName(event.target.value)}
+          />
+          <label htmlFor="action-body">动作 JSON</label>
+          <textarea
+            id="action-body"
+            value={importBody}
+            rows={4}
+            placeholder='{"group": "arms", "frames": [{"t": 0, "q": [ ... 14 项 ... ]}]}'
+            onChange={(event) => setImportBody(event.target.value)}
+          />
+          <button
+            type="button"
+            disabled={busy || !importName.trim() || !importBody.trim()}
+            onClick={() => void runImport()}
+          >
+            导入动作
+          </button>
+        </div>
+      </details>
     </section>
   );
 }

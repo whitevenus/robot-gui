@@ -1,7 +1,7 @@
 """动作库：本地数据目录里的 group+frames 动作文件。
 
 动作格式与 g1-action-studio 一致：{"group": ..., "frames": [{"t": ..., "q": [...]}]}，
-q 的顺序按 group 决定（arms_waist = 左臂 7 + 右臂 7 + 腰 3）。
+q 的顺序按 group 决定（arms = 左臂 7 + 右臂 7）。
 ECHO-G 转出的上肢轨迹就是这个格式，可以直接导入再回放到真机。
 
 数据目录由 ROBOT_GUI_DATA_DIR 指定，未配置时写操作明确失败，不静默回退到安装目录。

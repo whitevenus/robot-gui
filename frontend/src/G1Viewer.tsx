@@ -361,28 +361,24 @@ export function G1Viewer({
   }, [joints, hipImuRpy, lowStateState, hipImuState, modeMachine]);
 
   return (
-    <section className="pose-panel" aria-label="G1 三维姿态模型">
-      <div className="section-heading">
-        <div>
-          <p className="eyebrow">MEASURED POSE · UNITREE URDF</p>
-          <h2>G1 实测姿态</h2>
+    <section className="card pose-card" aria-label="G1 三维姿态模型">
+      <div className="card-head">
+        <h2>G1 实测姿态</h2>
+        <div className="card-head-actions">
+          <span className="meta">
+            LowState {lowStateState} ·{" "}
+            {lowStateAgeMs === null ? "—" : `${lowStateAgeMs} ms`} · IMU{" "}
+            {hipImuState} · {hipImuAgeMs === null ? "—" : `${hipImuAgeMs} ms`}
+          </span>
+          <button
+            className="view-reset"
+            type="button"
+            onClick={() => controlsRef.current?.reset()}
+            disabled={status === "load-error"}
+          >
+            重置视角
+          </button>
         </div>
-        <button
-          className="view-reset"
-          type="button"
-          onClick={() => controlsRef.current?.reset()}
-          disabled={status === "load-error"}
-        >
-          重置视角
-        </button>
-      </div>
-      <div className="pose-toolbar">
-        <span>拖动旋转 · 滚轮缩放</span>
-        <span>
-          LowState {lowStateState} · IMU {hipImuState} · 年龄：
-          {lowStateAgeMs === null ? "—" : `${lowStateAgeMs} ms`} /
-          {hipImuAgeMs === null ? "—" : ` ${hipImuAgeMs} ms`}
-        </span>
       </div>
       <div className="pose-canvas" ref={hostRef} aria-label="G1 29DoF 三维模型" />
       <p
@@ -400,6 +396,7 @@ export function G1Viewer({
       </p>
       <p className="pose-disclaimer">
         本模型为 Unitree 官方 G1 描述模型，仅显示关节与 IMU 实测姿态；不进行动力学仿真、平衡证明或安全验收。
+        拖动旋转 · 滚轮缩放
       </p>
     </section>
   );
