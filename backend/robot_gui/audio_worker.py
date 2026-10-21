@@ -23,8 +23,10 @@ PCM 从 stdin 读（不在命令行里传，也不落临时文件）。stdout �
 
 协议要点（官方《音频灯光服务接口》）：
 
-- `PlayStream(app_name, stream_id, pcm)` **分批推**，同一 stream_id 连续推就是
-  「缓存续播」，服务端接着播（官方例程也是 96000 字节一批、批间 sleep 1 秒）。
+- `PlayStream(app_name, stream_id, pcm)` **整段一次推完**。实测一次推 3.2 MB
+  （整套课程 100 秒的讲解）返回码 0、往返 0.37 秒。
+- **不要分块推**：同一个 stream_id 连续推，机器人端播放出来是沙沙声（2026-10-21
+  真机实测：开头正常，后面全白噪声）。官方例程的分块写法在本机上不成立。
 - `stream_id` **相同为缓存续播，不同则打断播放**。所以失败时**不能**用同一个
   stream_id 重推（机器人端会把已播内容再播一遍），换新的则会打断当前播放。
 - 服务端的播放是异步的：推完不等于播完，要等整段时长过去再 `PlayStop`，
@@ -44,11 +46,6 @@ import time
 
 SAMPLE_RATE = 16000
 BYTES_PER_SECOND = SAMPLE_RATE * 2
-#: 一批推多少字节：3 秒的音频（官方例程也是 96000 字节一批）。
-CHUNK_BYTES = 96000
-#: 每一批比"正好赶上播放"提前这么多秒推出去，留出播放端的抖动余量。
-#: 服务端因此只缓冲几秒音频，而不是整段（整段 100 秒就是 3 MB 的缓冲）。
-CHUNK_LEAD_S = 2.0
 #: 推完之后再多等这么久才 PlayStop：服务端的播放是异步的，立刻停会掐掉尾巴。
 TAIL_SINK_S = 0.3
 
@@ -80,22 +77,11 @@ def _push_stream(
     pcm: bytes,
     stopped: threading.Event,
 ) -> int:
-    """分批推流，返回机器人端的返回码（0 = 全部接受）。"""
-    started = time.monotonic()
-    chunk_seconds = CHUNK_BYTES / BYTES_PER_SECOND
-    for index, offset in enumerate(range(0, len(pcm), CHUNK_BYTES)):
-        # 第 index 批覆盖 [index*chunk_seconds, (index+1)*chunk_seconds) 秒的音频，
-        # 提前 CHUNK_LEAD_S 秒推出去。
-        due = max(0.0, index * chunk_seconds - CHUNK_LEAD_S)
-        _wait_until(started + due, stopped)
-        if stopped.is_set():
-            return 0
-        block = pcm[offset : offset + CHUNK_BYTES]
-        reply = client.PlayStream(app_name, stream_id, block)  # type: ignore[attr-defined]
-        code = reply[0] if isinstance(reply, tuple) else reply
-        if code != 0:
-            return code
-    return 0
+    """整段推一次，返回机器人端的返回码（0 = 接受）。"""
+    if stopped.is_set():
+        return 0
+    reply = client.PlayStream(app_name, stream_id, pcm)  # type: ignore[attr-defined]
+    return reply[0] if isinstance(reply, tuple) else reply
 
 
 def main() -> int:
@@ -127,7 +113,7 @@ def main() -> int:
 
     ChannelFactoryInitialize(0, args.interface)
     client = AudioClient()
-    # 超时给足：一批 PCM 要一次传过去，官方例程用的就是 10 秒。
+    # 超时给足：整段 PCM 要一次传过去，官方例程用的就是 10 秒。
     client.SetTimeout(args.timeout)
     client.Init()
 
