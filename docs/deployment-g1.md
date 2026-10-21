@@ -68,26 +68,30 @@ uv --version    # 0.13.1 aarch64
 
 ### 2.3 配置
 
+配置在项目的 `config/env.sh` 里，由 `tools/robot-gui.sh` 自动 source：
+
 ```bash
 export ROBOT_GUI_MODE=real
 export ROBOT_GUI_DDS_INTERFACE=eth0          # 机器人内部 DDS 网卡
-export ROBOT_GUI_DATA_DIR=/opt/robot-gui-data # 动作库目录，必须显式配置
-export ROBOT_GUI_CONTROLS_ENABLED=1           # 开启真机控制；不设置则只读
-export ROBOT_GUI_FSM_WHITELIST=501            # 允许回放的 FSM（501=三自由度腰部常规运控）
-export ROBOT_GUI_TRANSITION_SECONDS=2.0       # 进入/返回的过渡段时长
-export ROBOT_GUI_REPLAY_SPEED=1.0
-export ROBOT_GUI_HOLD_SOAK_S=3.0               # 动作结束后的沉降观察窗口
+export ROBOT_GUI_DATA_DIR=<项目根>/data       # 动作库目录
+export ROBOT_GUI_GAINS=<项目根>/config/gains.json
+export ROBOT_GUI_TELEMETRY_HZ=10
 ```
+
+`start-control` 另外会设上 `ROBOT_GUI_CONTROLS_ENABLED=1`、
+`ROBOT_GUI_FSM_WHITELIST=501`、`ROBOT_GUI_AUDIO_ENABLED=1`。
+其余可调项（`ROBOT_GUI_TRANSITION_SECONDS`、`ROBOT_GUI_REPLAY_SPEED`、
+`ROBOT_GUI_HOLD_SOAK_S`）在 `config/env.sh` 里加。
 
 | 变量 | 默认 | 含义 |
 |---|---|---|
 | `ROBOT_GUI_MODE` | `real` | 只接受 `real`；其他值启动即失败 |
 | `ROBOT_GUI_DDS_INTERFACE` | 无 | **必填**，DDS 网卡 |
-| `ROBOT_GUI_DATA_DIR` | 无 | **动作库目录**。未配置时动作接口返回 `action_store_not_configured`，不会静默回退到安装目录 |
+| `ROBOT_GUI_DATA_DIR` | `<项目根>/data` | **动作库目录**。目录不存在时动作接口返回 `action_store_not_configured` |
+| `ROBOT_GUI_GAINS` | `<项目根>/config/gains.json` | 增益 JSON 路径。**需要 arms 与 waist 两组** |
 | `ROBOT_GUI_CONTROLS_ENABLED` | `false` | 开启后才接受回放请求 |
 | `ROBOT_GUI_FSM_WHITELIST` | `501` | 逗号分隔；不在列表内的 FSM 一律拒绝下发 |
 | `ROBOT_GUI_FSM_MODES` | 无 | 收窄允许切换的 FSM 模式 ID，逗号分隔，如 `0,1,4,501`。**留空 = 目录里的模式全部可点**；只有想收窄时才设 |
-| `ROBOT_GUI_GAINS` | 内置 arms 120/3.5、waist 300/5 | 增益 JSON 路径，**需要 arms 与 waist 两组**：腰的槽位由我们下发，必须有刚度才撑得住躯干 |
 | `ROBOT_GUI_TRANSITION_SECONDS` | `2.0` | 进入与返回的衔接段时长 |
 | `ROBOT_GUI_REPLAY_SPEED` | `1.0` | 动作速度倍率 |
 | `ROBOT_GUI_HOLD_SOAK_S` | `3.0` | 动作结束后的沉降观察窗口，见 [§6.1](#61-沉降窗口与前倾峰值) |
@@ -119,24 +123,54 @@ npm run dev -- --host 0.0.0.0 --port 5173
 
 不设 `ROBOT_GUI_BACKEND` 时代理仍指向本机 8000（机器人本机部署的行为不变）。
 
-机器人侧的启停脚本在仓库的 `tools/robot-gui.sh`，家目录只留一个软链：
+## 2. 机器人侧的目录布局
 
-```bash
-ln -sf /usr/local/src/robot-gui/tools/robot-gui.sh ~/robot-gui.sh
+**所有东西都在项目目录里**，家目录不留副本、不留软链：
+
+```
+/usr/local/src/robot-gui/
+├── config/            # 配置（跟代码一起走）
+│   ├── env.sh         # 环境变量，由 tools/robot-gui.sh 自动 source
+│   └── gains.json     # arms / waist 增益
+├── data/              # 动作库：导入的 group+frames JSON 与 audio/*.pcm
+├── logs/              # 后端与前端日志、采样数据
+├── tools/             # 现场脚本
+├── backend/  frontend/  docs/
 ```
 
-```bash
-bash ~/robot-gui.sh start            # 只读
-bash ~/robot-gui.sh start-control    # 开启真机控制 + 机器人扬声器语音
-bash ~/robot-gui.sh restart-control  # 同上并重启
-bash ~/robot-gui.sh status
-bash ~/robot-gui.sh stop
-```
+`logs/` 与 `data/` 是运行期产物，已在 `.gitignore` 里，不入库。
 
-现场观测脚本都在仓库的 `tools/` 下，**直接用仓库里的那份，不往家目录散落**：
+迁移自旧布局（家目录）：
 
 ```bash
 cd /usr/local/src/robot-gui
+mkdir -p config data logs
+cp -a ~/.config/robot-gui/gains.json config/    # 若已存在 config/gains.json 则跳过
+cp -a ~/robot-gui-data/. data/                 # 动作库
+rm -rf ~/.config/robot-gui ~/robot-gui-data ~/robot-gui-track.sh
+```
+
+后端默认就找项目内的 `config/gains.json` 与 `data/`（`ROBOT_GUI_GAINS` /
+`ROBOT_GUI_DATA_DIR` 只是覆盖手段）。
+
+---
+
+## 3. 机器人侧的启停与观测
+
+启停脚本在仓库的 `tools/robot-gui.sh`，**直接用仓库里的那份**：
+
+```bash
+cd /usr/local/src/robot-gui
+bash tools/robot-gui.sh start            # 只读
+bash tools/robot-gui.sh start-control    # 开启真机控制 + 机器人扬声器语音
+bash tools/robot-gui.sh restart-control  # 同上并重启
+bash tools/robot-gui.sh status
+bash tools/robot-gui.sh stop
+```
+
+观测脚本同样都在 `tools/` 下：
+
+```bash
 chmod +x tools/*.sh tools/*.py        # 一次性
 ./tools/robot-gui-track.sh p1_s2      # 回放 + 全程采样 + 判读摘要
 python3 tools/inspect_fsm.py eth0    # 读当前运动模式（fsm_id + fsm_mode）
@@ -145,11 +179,13 @@ python3 tools/check_waist_locked.py eth0 --seconds 60   # 物理锁腰判别（�
 
 | 脚本 | 用途 |
 |---|---|
-| `tools/robot-gui.sh` | 启停后端与前端（`~/robot-gui.sh` 是它的软链） |
+| `tools/robot-gui.sh` | 启停后端与前端，日志写 `logs/` |
 | `tools/robot-gui-track.sh` | 回放一次动作，打印跟踪误差、下盘漂移、腰 14 全程曲线 |
-| `tools/pose_sampler.py` | 全程姿态采样器（由 track.sh 调用） |
+| `tools/pose_sampler.py` | 全程姿态采样器（由 track.sh 调用，输出 `logs/pose_samples.json`） |
 | `tools/inspect_fsm.py` | 读 `fsm_id` 与 `fsm_mode`（静态/运动） |
 | `tools/check_waist_locked.py` | 物理锁腰判别：腰掰不动 + 膝盖能掰动 = 装了固定件 |
+
+看后端日志：`tail -f logs/backend.log`。
 
 `start-control` 等价于设置 `ROBOT_GUI_CONTROLS_ENABLED=1`、`ROBOT_GUI_FSM_WHITELIST=501`、
 `ROBOT_GUI_AUDIO_ENABLED=1` 后再启动。脚本用 `setsid` 启动，SSH 断开或终端关闭都不会带走进程。

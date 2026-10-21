@@ -4,24 +4,25 @@
 # 用法: ./tools/robot-gui-track.sh <动作名>   例如 p1_s2
 #
 # 脚本和采样器都在仓库的 tools/ 下，跟着代码一起部署，不往家目录散落。
-# 数据文件（pose_samples.json）写 /tmp，那是临时产物，重启即清。
-# —— 以前放 /tmp，机器人重启就没了，track.sh 直接跑不起来。
+# 采样数据统一写仓库的 logs/ 目录。
 #
-# 判读要点（详见 docs/deployment-g1.md §6.3）：
-#   腰 12/13/14 的「模式」读数从 1 变成 0 → 我们写的 mode=0 真的作用到了驱动；
-#   配合腰 14 的角度曲线判断固件是继续管腰（腰稳）还是把腰交给了我们（腰瘫）。
+# 判读要点（详见 docs/deployment-g1.md §6.2）：
+#   腰 14 的前倾峰值：< 5° 说明腰的支撑力矩够用；顶到 +30° 说明力矩饱和或增益没生效。
 set -u
 
 ACTION="${1:-p1_s2}"
-ROOT=/usr/local/src/robot-gui
+# 从脚本自身位置推仓库根，不写死绝对路径
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BASE=http://127.0.0.1:8000
 PY=$ROOT/backend/.venv/bin/python
 SAMPLER=$ROOT/tools/pose_sampler.py
 SAMPLE_SECONDS=25
-OUT=/tmp/pose_samples.json
+LOGS=$ROOT/logs
+mkdir -p "$LOGS"
+OUT=$LOGS/pose_samples.json
 
-# DDS 网卡名从后端的 env 文件里取，和后端自己用的一致
-ENV_FILE=$HOME/.config/robot-gui/env.sh
+# DDS 网卡名从项目内的 config/env.sh 取，和后端自己用的一致
+ENV_FILE=$ROOT/config/env.sh
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
 IFACE=${ROBOT_GUI_DDS_INTERFACE:-eth0}
 

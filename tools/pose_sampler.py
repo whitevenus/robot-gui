@@ -12,7 +12,7 @@
 用法：
 
     python3 pose_sampler.py eth0 25            # 网卡 + 秒数
-    python3 pose_sampler.py eth0 25 --out /tmp/pose_samples.json
+    python3 tools/pose_sampler.py eth0 25 --out logs/pose_samples.json
 
 **纯订阅，不发任何控制命令**，不会干扰正在跑的回放。
 """
@@ -27,6 +27,10 @@ from pathlib import Path
 from typing import Any
 
 WAIST_SLOTS = (12, 13, 14)
+
+#: 项目根目录（tools/pose_sampler.py → 上一级）。采样数据写项目内的 logs/，
+#: 不散落到 /tmp 或家目录。
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WEIGHT_SLOT = 29
 SAMPLE_HZ = 20.0
 
@@ -86,7 +90,10 @@ def main() -> int:
     parser.add_argument("interface", help="DDS 网卡名，例如 eth0")
     parser.add_argument("seconds", type=float, help="采样时长（秒）")
     parser.add_argument(
-        "--out", type=Path, default=Path("/tmp/pose_samples.json"), help="JSON 输出路径"
+        "--out",
+        type=Path,
+        default=PROJECT_ROOT / "logs" / "pose_samples.json",
+        help="JSON 输出路径（默认写项目内的 logs/）",
     )
     parser.add_argument("--low-state-topic", default="rt/lowstate")
     parser.add_argument("--torso-imu-topic", default="rt/lf/secondary_imu")

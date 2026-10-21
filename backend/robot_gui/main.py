@@ -28,6 +28,10 @@ from .gravity import GravityFeedforward, default_model_path
 from .sdk_runtime import describe_crc_status, ensure_crc_libraries
 from .telemetry import TelemetryHub
 
+#: 项目根目录（backend/robot_gui/main.py → 上两级）。配置、动作库、日志都在它下面，
+#: 不往家目录散落。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 
 def _configure_logging() -> None:
     """换掉 loguru 的默认 handler：输出到 stderr，带模块名，级别可用环境变量调。"""
@@ -83,8 +87,11 @@ class RuntimeSettings:
         whitelist = tuple(
             int(part) for part in whitelist_raw.split(",") if part.strip().isdigit()
         )
-        data_dir = os.getenv("ROBOT_GUI_DATA_DIR") or None
-        gains = os.getenv("ROBOT_GUI_GAINS") or None
+        # 配置和动作库都在项目目录里，不往家目录散落；环境变量仍可覆盖。
+        data_dir = os.getenv("ROBOT_GUI_DATA_DIR") or str(PROJECT_ROOT / "data")
+        gains = os.getenv("ROBOT_GUI_GAINS") or str(
+            PROJECT_ROOT / "config" / "gains.json"
+        )
         return cls(
             mode=os.getenv("ROBOT_GUI_MODE", "real").strip().lower(),
             controls_enabled=os.getenv("ROBOT_GUI_CONTROLS_ENABLED", "false")

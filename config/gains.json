@@ -1,0 +1,14 @@
+{
+  "arms": {
+    "hold_kp": 120.0,
+    "hold_kd": 3.5,
+    "teach_kp": 20.0,
+    "teach_kd": 1.5
+  },
+  "waist": {
+    "hold_kp": 300.0,
+    "hold_kd": 5.0,
+    "teach_kp": 20.0,
+    "teach_kd": 1.5
+  }
+}

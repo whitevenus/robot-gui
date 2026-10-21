@@ -1,28 +1,31 @@
 #!/usr/bin/env bash
 # Robot GUI 真机侧启停脚本。
 #
-# 放在仓库里（tools/robot-gui.sh），家目录只留一个软链：
-#     ln -sf /usr/local/src/robot-gui/tools/robot-gui.sh ~/robot-gui.sh
-# 这样脚本本体跟着代码版本走，配置和脚本都在一处，方便查看和管理。
+# 放在仓库里（tools/robot-gui.sh），**直接用仓库里的这份**，不往家目录放软链或副本：
+#     cd /usr/local/src/robot-gui && bash tools/robot-gui.sh status
+# 日志也统一写在仓库的 logs/ 目录里，不散落到 /tmp 或家目录。
 set -u
 
 # 从脚本自身位置推仓库根，不写死绝对路径
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-ENV_FILE=$HOME/.config/robot-gui/env.sh
+LOGS="$ROOT/logs"
+mkdir -p "$LOGS"
+# 配置在项目内（config/env.sh），不读家目录的 ~/.config/robot-gui/。
+ENV_FILE=$ROOT/config/env.sh
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
 export PATH=$HOME/.local/bin:$PATH
 
 start_backend() {
   cd "$ROOT"
   setsid nohup uv run --directory backend uvicorn robot_gui.main:app \
-      --host 0.0.0.0 --port 8000 > /tmp/robot-gui-backend.log 2>&1 < /dev/null &
-  echo "backend -> /tmp/robot-gui-backend.log"
+      --host 0.0.0.0 --port 8000 > "$LOGS/backend.log" 2>&1 < /dev/null &
+  echo "backend -> $LOGS/backend.log"
 }
 start_frontend() {
   cd "$ROOT/frontend"
   setsid nohup npm run dev -- --host 0.0.0.0 --port 5173 \
-      > /tmp/robot-gui-frontend.log 2>&1 < /dev/null &
-  echo "frontend -> /tmp/robot-gui-frontend.log"
+      > "$LOGS/frontend.log" 2>&1 < /dev/null &
+  echo "frontend -> $LOGS/frontend.log"
 }
 stop_all() {
   pkill -f "uvicorn robot_gui" 2>/dev/null && echo "stopped backend" || echo "backend 未运行"
