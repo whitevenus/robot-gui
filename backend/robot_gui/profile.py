@@ -68,6 +68,10 @@ WAIST_SDK_SLOTS: tuple[int, ...] = tuple(
 LOWER_BODY_JOINT_NAMES: frozenset[str] = frozenset(
     joint.name for joint in G1_29DOF_JOINTS if joint.group in LOWER_BODY_GROUPS
 )
+#: 腰 3 关节的名字，按 SDK 槽位顺序（yaw 12 / roll 13 / pitch 14）。
+WAIST_JOINT_NAMES: tuple[str, ...] = tuple(
+    joint.name for joint in G1_29DOF_JOINTS if joint.group == "waist"
+)
 
 if len(G1_29DOF_JOINTS) != 29:
     raise RuntimeError("G1 29DoF profile must define exactly 29 joints.")

@@ -26,20 +26,30 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from math import comb
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from g1_action_studio.model import ArmModel
-from g1_action_studio.motion import Action, StartPose
-from g1_action_studio.planner import plan_sequence_with_marks
+from g1_action_studio.motion import Action, StartPose, Trajectory
+from g1_action_studio.planner import connect, plan_sequence_with_marks
 from g1_action_studio.robot import RobotSession
 from loguru import logger
+from scipy.interpolate import PPoly
 
 from .actions import ActionStore, ActionStoreError
 from .audio import G1AudioPort
 from .gravity import GravityFeedforward, install_gravity_command_builder
-from .profile import LOWER_BODY_JOINT_NAMES
+from .profile import LOWER_BODY_JOINT_NAMES, WAIST_JOINT_NAMES
+from .records import (
+    OUTCOME_CANCELLED,
+    OUTCOME_COMPLETED,
+    OUTCOME_FAULT,
+    OUTCOME_PAUSED,
+    ExecutionRecorder,
+    RecordStore,
+)
 
 #: 本工作台的接管范围：双臂 14 关节 + 腰 3 关节。
 #:
@@ -76,6 +86,7 @@ class ControlPhase(StrEnum):
     PLANNING = "planning"
     ACQUIRING = "acquiring"
     PLAYING = "playing"
+    PAUSED = "paused"
     RELEASING = "releasing"
     FAULT = "fault"
 
@@ -264,15 +275,18 @@ class ControlService:
         action_store: ActionStore,
         audio_port: G1AudioPort | None = None,
         feedforward: GravityFeedforward | None = None,
+        records: RecordStore | None = None,
     ) -> None:
         self._settings = settings
         self._telemetry = telemetry
         self._store = action_store
         self._audio = audio_port
         self._feedforward = feedforward
+        self._records = records
         # 必须是可重入锁：release() 会在持锁状态下调用 state()。
         self._lock = threading.RLock()
         self._cancel = threading.Event()
+        self._pause_requested = threading.Event()
         self._phase = ControlPhase.IDLE
         self._message = ""
         self._action_name = ""
@@ -281,6 +295,24 @@ class ControlService:
         self._trajectory_duration = 0.0
         self._tracking: dict[str, Any] = {}
         self._lower_body: dict[str, Any] = {}
+        # 本次回放用的速度（前端下拉传进来的），与设置里的默认值分开记。
+        self._current_speed = settings.replay_speed
+        # 暂停后要接着播的那几段动作。
+        self._resume_names: tuple[str, ...] = ()
+        self._resume_speed = settings.replay_speed
+        self._resume_kind = "action"
+        # 本次会话的动作清单、各段在轨迹里的起始时刻、轨迹开始播放的时刻。
+        # 暂停时要用它们算出"播到哪一段了"。
+        self._run_names: list[str] = []
+        self._run_marks: list[float] = []
+        self._run_kind = "action"
+        self._play_started: float | None = None
+        # 当前会话与当前轨迹：暂停时要拿它们把动作停在当前位置。
+        self._session: RobotSession | None = None
+        self._trajectory: Any = None
+        self._pause_trajectory: Trajectory | None = None
+        # 正在播"回到接管姿态"的那一段（监视线程要跟着它继续采样）。
+        self._pause_returning = False
         # 必须无条件安装：补丁负责给所有被接管的关节（含腰）加重力前馈。
         # 不装它就会退回 studio 原版 build_command，腰没有前馈、撑不住躯干。
         install_gravity_command_builder(feedforward)
@@ -300,6 +332,11 @@ class ControlService:
                 "gravity_compensation": self._feedforward is not None,
                 "tracking": self._tracking,
                 "lower_body": self._lower_body,
+                # 前端速度下拉的默认值来自设置（ROBOT_GUI_REPLAY_SPEED），
+                # 实际这一把用的是 current_speed。
+                "default_speed": self._settings.replay_speed,
+                "current_speed": self._current_speed,
+                "resume_actions": list(self._resume_names),
             }
 
     def _measured_arms(self) -> np.ndarray | None:
@@ -326,23 +363,50 @@ class ControlService:
         lower: LowerBodyMonitor,
         cancel: threading.Event,
         soak_s: float,
+        recorder: ExecutionRecorder | None = None,
     ) -> None:
         deadline = started + trajectory.duration + soak_s
         while not cancel.is_set():
             elapsed = time.monotonic() - started
+            angles = self._measured_named()
             if elapsed > trajectory.duration:
                 # 动作结束后的沉降期：漂移是延迟出现的，只看动作期间抓不到。
-                lower.update(self._measured_named())
-                if elapsed > deadline:
-                    return
+                lower.update(angles)
+                # 暂停时正在播"回到接管姿态"的那一段，监视要跟着它继续跑。
+                if elapsed > deadline and not self._pause_returning:
+                    break
             else:
                 target, _ = trajectory.sample(elapsed)
                 # studio 的 upper_q 顺序是双臂在前、腰在后，只取前 14 位与实测对齐。
                 arms_target = np.asarray(target, dtype=float)[:ARM_JOINT_COUNT]
                 measured = self._measured_arms()
                 monitor.update(arms_target, measured)
-                lower.update(self._measured_named())
+                lower.update(angles)
+            if recorder is not None:
+                self._sample_record(recorder, elapsed, angles)
             cancel.wait(0.02)
+
+    def _sample_record(
+        self,
+        recorder: ExecutionRecorder,
+        elapsed: float,
+        angles: dict[str, float],
+    ) -> None:
+        """把这一刻的姿态记进执行记录：腰 14 的角度与 mode 回读、两路 IMU。
+
+        采样窗口跟着回放走：慢放时轨迹更长，记录也就更长，不需要另设参数。
+        """
+        modes = self._telemetry.latest_joint_modes() or {}
+        hip_rpy, torso_rpy = self._telemetry.latest_imu_rpy()
+        recorder.sample(
+            elapsed,
+            waist_pitch=angles.get("waist_pitch"),
+            waist_modes=(
+                [modes.get(name) for name in WAIST_JOINT_NAMES] if modes else None
+            ),
+            torso_pitch=_pitch_of(torso_rpy),
+            hip_pitch=_pitch_of(hip_rpy),
+        )
 
     def _set_phase(
         self, phase: ControlPhase, message: str = "", error_code: str = ""
@@ -409,32 +473,45 @@ class ControlService:
         *,
         confirmed: bool,
         audio_clips: dict[str, bytes] | None = None,
+        speed: float | None = None,
+        kind: str = "action",
     ) -> dict[str, Any]:
         """回放一个动作，或课程清单里的**一整套**。
 
         一整套 = 多个动作按顺序规划成**一条连续轨迹**（动作之间是规划出来的衔接段，
         不是各播各的再回基线），讲解语音按每个动作在轨迹里的起始时刻拼成一条
         连续的 PCM，两边都按同一份时刻表走。
+
+        `speed` 是这一把的速度倍率（页面上拉给的），不给就用配置里的默认值。
         """
         names = list(action_names)
         if not names:
             raise ControlError("action_required", "没有要回放的动作。")
+        speed = self._settings.replay_speed if speed is None else float(speed)
+        if not 0 < speed <= 2.0:
+            raise ControlError("replay_speed_invalid", "回放速度必须在 (0, 2] 之间。")
         with self._lock:
             if self._worker is not None and self._worker.is_alive():
                 raise ControlError("control_busy", "已有控制会话在执行，拒绝并发接管。")
         actions = self._preflight(names, confirmed)
         self._cancel = threading.Event()
+        self._pause_requested = threading.Event()
         label = names[0] if len(names) == 1 else f"整套 {len(names)} 段"
         self._set_phase(ControlPhase.PLANNING, f"正在规划 {label}")
         worker = threading.Thread(
             target=self._run,
-            args=(names, actions, dict(audio_clips or {})),
+            args=(names, actions, dict(audio_clips or {}), speed, kind),
             name="robot-gui-control",
             daemon=False,
         )
         with self._lock:
             self._worker = worker
             self._action_name = label
+            self._current_speed = speed
+            self._run_names = list(names)
+            self._run_marks = []
+            self._run_kind = kind
+            self._play_started = None
         worker.start()
         return self.state()
 
@@ -447,6 +524,146 @@ class ControlService:
             self._phase = ControlPhase.RELEASING
             self._message = "正在交还控制权"
         return self.state()
+
+    def pause(self) -> dict[str, Any]:
+        """暂停当前回放：停语音，把机器人动态带回接管姿态，再交还控制权。
+
+        **rt/arm_sdk 没有暂停原语**：它只认"每个控制周期发什么目标角和增益"，
+        没有"停在这里"的概念。所以暂停是我们自己拼出来的三步：
+
+        1. **停在这里**：把 studio 正在播的轨迹换成长度=当前已播时长的那一段，
+           目标角连续不跳，studio 下一帧就认为这段播完了（动作停住，权重仍是 1）；
+        2. **动态回到接管瞬间的姿态**：在同一个会话里播一段规划出来的连接段，
+           从停住的位置回到接管时的姿态（腰也一起回基线）；
+        3. **再交还控制权**：会话结束时 studio 用 2 秒把权重斜坡降到 0。
+
+        这样机器人不会停在半个手势里交给固件，而是先自己走回基线再放手。
+        接管全程没断过，腰的支撑力矩一直是我们在给。
+
+        暂停时按轨迹时刻算出播到第几段：整课续播从**下一段**的语音和动作开始；
+        单个动作续播重播这一段（它还没播完）。
+        """
+        with self._lock:
+            if self._phase not in (
+                ControlPhase.PLANNING,
+                ControlPhase.ACQUIRING,
+                ControlPhase.PLAYING,
+            ):
+                raise ControlError("control_idle", "当前没有可暂停的回放。")
+            started = self._play_started
+            session = self._session
+            trajectory = self._trajectory
+        elapsed = 0.0 if started is None else time.monotonic() - started
+        remaining = self._remaining_after(elapsed)
+        with self._lock:
+            self._resume_names = tuple(remaining)
+            self._resume_speed = self._current_speed
+            self._resume_kind = self._run_kind
+            self._pause_requested.set()
+            self._phase = ControlPhase.RELEASING
+            self._message = "正在回到接管姿态并交还控制权"
+        if self._audio is not None:
+            self._audio.stop()
+        truncated = _truncate(trajectory, elapsed) if session is not None else None
+        if truncated is not None:
+            with self._lock:
+                self._pause_trajectory = truncated
+            # 换掉 studio 正在播的轨迹：它下一帧就把这一段播完，于是动作停住。
+            # studio 没有公开的"截短"接口，只能换掉它手里的轨迹对象——
+            # 换的是同类型的 Trajectory，不改子模块的代码（子模块在机器人上是
+            # 单独同步的，改它要额外一步，docs/deployment-g1.md §2 有说明）。
+            session._trajectory = truncated  # noqa: SLF001
+        else:
+            # 还在规划或刚接管：没有动作在播，直接中止这次会话。
+            self._cancel.set()
+        return self.state()
+
+    def _play_return_to_baseline(
+        self,
+        session: RobotSession,
+        model: Any,
+        baseline: np.ndarray,
+        cancel: threading.Event,
+    ) -> None:
+        """把机器人动态带回接管瞬间的姿态，然后才交还控制权。
+
+        起点是**停住那一刻的目标角**（不是实测角）：实测角带着跟踪偏差，
+        用它当起点等于让目标角跳一下，手臂会猛甩一下。
+        """
+        with self._lock:
+            truncated = self._pause_trajectory
+            original = self._trajectory
+        if truncated is not None:
+            source = np.asarray(truncated.last_q, dtype=float)
+        elif original is not None:
+            source = np.asarray(original.last_q, dtype=float)
+        else:
+            return
+        target = np.asarray(baseline, dtype=float)
+        if source.shape != target.shape or np.allclose(source, target):
+            return
+        # 回基线的路可能比动作之间的衔接段长，给它按距离留够时间：
+        # 五次样条的峰值速度约 1.875×距离/时长，这里压在 ~1 rad/s 上下。
+        distance = float(np.linalg.norm(target - source))
+        seconds = max(self._settings.transition_seconds, 1.875 * distance)
+        try:
+            returning = connect(
+                model,
+                source,
+                target,
+                {"arms_waist"},
+                seconds,
+                cancel,
+            )
+        except Exception as error:  # noqa: BLE001 - 回不去也要把控制权交还
+            logger.warning("回到接管姿态的连接段规划失败：{}", error)
+            return
+        if returning is None:
+            return
+        session.play(returning)
+
+    def _remaining_after(self, elapsed: float) -> list[str]:
+        """暂停后要接着播的动作：从**下一段**开始。
+
+        marks 是每段动作**本体**的起始时刻，已经起播的段数就是"播到哪儿了"。
+        整课：下一段（被打断的那段不重播）。单个动作：它自己——它还没播完，
+        续播就是重播这一段。
+        """
+        with self._lock:
+            names = list(self._run_names)
+            marks = list(self._run_marks)
+        played = sum(1 for mark in marks if mark <= elapsed)
+        remaining = names[played:]
+        if not remaining:
+            remaining = names[max(0, played - 1) :]
+        return remaining
+
+    def resume(self) -> dict[str, Any]:
+        """从暂停处继续：按当前实测姿态重新规划，只播还没播完的那几段。
+
+        语音也从下一段重新起播：官方音频接口没有"从中间续播"这回事，
+        同一个 stream_id 重推会让机器人把已播内容再播一遍。
+        """
+        with self._lock:
+            if self._phase != ControlPhase.PAUSED:
+                raise ControlError("not_paused", "当前没有可继续的暂停会话。")
+            names = list(self._resume_names)
+            speed = self._resume_speed
+            kind = self._resume_kind
+        if not names:
+            raise ControlError("not_paused", "没有可继续的动作。")
+        clips: dict[str, bytes] = {}
+        for name in names:
+            pcm = self._store.read_audio(name)
+            if pcm is not None:
+                clips[name] = pcm
+        return self.request_replay(
+            names,
+            confirmed=True,
+            audio_clips=clips,
+            speed=speed,
+            kind=kind,
+        )
 
     def wait_idle(self, timeout: float | None = None) -> dict[str, Any]:
         worker = self._worker
@@ -461,10 +678,26 @@ class ControlService:
         names: list[str],
         actions: list[Action],
         audio_clips: dict[str, bytes],
+        speed: float,
+        kind: str,
     ) -> None:
         cancel = self._cancel
         session: RobotSession | None = None
         audio_thread: threading.Thread | None = None
+        monitor: TrackingMonitor | None = None
+        lower: LowerBodyMonitor | None = None
+        recorder = ExecutionRecorder(
+            kind=kind,
+            label=names[0] if len(names) == 1 else f"整套 {len(names)} 段",
+            actions=names,
+            speed=speed,
+            slug=names[0] if kind == "action" else "course",
+        )
+        started = time.monotonic()
+        outcome = OUTCOME_COMPLETED
+        error_code = ""
+        error_message = ""
+        marks: list[float] = []
         try:
             self._set_phase(ControlPhase.PLANNING, "等待机器人反馈")
             # arms 组是 14 维动作，腰的三维在轨迹里恒等于接管瞬间的姿态；
@@ -486,12 +719,13 @@ class ControlService:
                     actions,
                     start,
                     model,
-                    self._settings.replay_speed,
+                    speed,
                     self._settings.transition_seconds,
                     cancel,
                 )
                 with self._lock:
                     self._trajectory_duration = float(trajectory.duration)
+                    self._run_marks = list(marks)
                 self._set_phase(ControlPhase.ACQUIRING, "接管双臂控制权")
                 session.acquire()
                 if self._audio is not None and audio_clips:
@@ -516,40 +750,138 @@ class ControlService:
                         lower,
                         cancel,
                         self._settings.hold_soak_s,
+                        recorder,
                     ),
                     name="robot-gui-tracking",
                     daemon=True,
                 )
                 monitor_thread.start()
+                with self._lock:
+                    # 轨迹时钟从这一刻起算：暂停时用它算"播到哪一段了"。
+                    self._play_started = time.monotonic()
+                    self._session = session
+                    self._trajectory = trajectory
                 session.play(trajectory)
+                if self._pause_requested.is_set():
+                    # 暂停：动作已经停在当前这一刻，接着把它动态带回接管姿态，
+                    # 带回之后才交还控制权（接管全程没断，腰一直有支撑力矩）。
+                    outcome = OUTCOME_PAUSED
+                    self._pause_returning = True
+                    try:
+                        self._play_return_to_baseline(
+                            session,
+                            model,
+                            start.upper_q,
+                            cancel,
+                        )
+                    finally:
+                        self._pause_returning = False
                 # 沉降期：下盘漂移是延迟出现的，必须等它跑完再判定。
                 monitor_thread.join(timeout=self._settings.hold_soak_s + 2.0)
-                with self._lock:
-                    self._tracking = monitor.report()
-                    self._lower_body = lower.report()
                 if lower.violated:
+                    outcome = OUTCOME_FAULT
+                    error_code = "lower_body_drift"
+                    error_message = f"下盘漂移 {lower.report()['max_drift_deg']}° 超过阈值，已交还控制权"
                     self._set_phase(
                         ControlPhase.FAULT,
-                        f"下盘漂移 {lower.report()['max_drift_deg']}° 超过阈值，"
-                        "已交还控制权",
-                        "lower_body_drift",
+                        error_message,
+                        error_code,
                     )
+                else:
+                    self._set_phase(ControlPhase.RELEASING, "回放完成，交还控制权")
                 if audio_thread is not None:
                     audio_thread.join(timeout=5.0)
-                self._set_phase(ControlPhase.RELEASING, "回放完成，交还控制权")
-            self._set_phase(ControlPhase.IDLE, "已交还控制权")
+            # 会话退出 → studio 把接管权重在 2 秒内斜坡降到 0，控制权真正交还。
+            if outcome == OUTCOME_PAUSED:
+                self._set_phase(
+                    ControlPhase.PAUSED,
+                    "已暂停：机器人已回到接管姿态，控制权已交还",
+                )
+            elif outcome != OUTCOME_FAULT:
+                # 交还控制权之后回到空闲；但下盘越限的故障状态要留住，别被覆盖掉。
+                self._set_phase(ControlPhase.IDLE, "已交还控制权")
         except Exception as error:  # noqa: BLE001 - 控制路径必须把任何异常收敛成状态
-            code = getattr(error, "code", "") or "control_failed"
-            message = str(error) or type(error).__name__
-            self._set_phase(ControlPhase.FAULT, message, code)
+            if cancel.is_set() and isinstance(error, InterruptedError):
+                # 操作员按了停止：不是故障。
+                outcome = OUTCOME_CANCELLED
+                error_message = "已停止并交还控制权"
+                self._set_phase(ControlPhase.IDLE, error_message)
+            elif self._pause_requested.is_set():
+                # 暂停是操作员主动的：不是故障，控制权已经交还。
+                outcome = OUTCOME_PAUSED
+                error_message = "已暂停"
+                self._set_phase(
+                    ControlPhase.PAUSED,
+                    "已暂停：控制权已交还，可继续播放剩余动作",
+                )
+            else:
+                outcome = OUTCOME_FAULT
+                error_code = getattr(error, "code", "") or "control_failed"
+                error_message = str(error) or type(error).__name__
+                self._set_phase(ControlPhase.FAULT, error_message, error_code)
         finally:
             if audio_thread is not None and audio_thread.is_alive():
                 cancel.set()
                 audio_thread.join(timeout=2.0)
             if self._audio is not None and self._audio.playing:
                 self._audio.stop()
+            tracking = monitor.report() if monitor is not None else {}
+            lower_body = lower.report() if lower is not None else {}
             with self._lock:
+                self._tracking = tracking
+                self._lower_body = lower_body
                 self._worker = None
+                self._session = None
+                self._trajectory = None
+                self._pause_trajectory = None
+            self._write_record(
+                recorder,
+                outcome=outcome,
+                elapsed_s=time.monotonic() - started,
+                trajectory_duration_s=self._trajectory_duration,
+                tracking=tracking,
+                lower_body=lower_body,
+                marks=marks,
+                names=names,
+                error_code=error_code,
+                error_message=error_message,
+            )
+
+    def _write_record(
+        self,
+        recorder: ExecutionRecorder,
+        *,
+        outcome: str,
+        elapsed_s: float,
+        trajectory_duration_s: float,
+        tracking: dict[str, Any],
+        lower_body: dict[str, Any],
+        marks: list[float],
+        names: list[str],
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        """把这次执行落成一条记录（项目目录里的 JSON，不上数据库）。"""
+        if self._records is None:
+            return
+        segments = [
+            {"name": name, "start_s": round(mark, 3)}
+            for name, mark in zip(names, marks, strict=False)
+        ]
+        record = recorder.build(
+            outcome=outcome,
+            elapsed_s=elapsed_s,
+            trajectory_duration_s=trajectory_duration_s,
+            tracking=tracking,
+            lower_body=lower_body,
+            segments=segments,
+            error_code=error_code,
+            error_message=error_message,
+        )
+        try:
+            self._records.write(record)
+        except Exception:  # noqa: BLE001 - 记录写失败不能影响控制流程
+            logger.exception("执行记录写入失败：{}", record.get("id"))
 
     @staticmethod
     def _build_clips(
@@ -582,7 +914,11 @@ class ControlService:
         def worker() -> None:
             error = self._audio.play(clips, cancel)
             if error:
-                logger.warning("PCM 推流失败（{}）", error)
+                if self._pause_requested.is_set():
+                    # 暂停时是我们主动停的语音，不是推流故障。
+                    logger.info("讲解语音已随暂停中断（{}）", error)
+                else:
+                    logger.warning("PCM 推流失败（{}）", error)
                 return
             logger.info("讲解语音播放完成（{} 段）", len(clips))
 
@@ -596,6 +932,58 @@ def arm_joint_names() -> tuple[str, ...]:
     from g1_action_studio.model import GROUPS, UPPER_JOINTS
 
     return tuple(UPPER_JOINTS[index].replace("_joint", "") for index in GROUPS["arms"])
+
+
+def _pitch_of(rpy: list[float] | None) -> float | None:
+    """IMU 的 pitch（rpy 的第二个分量，弧度）；拿不到就返回 None，不猜。"""
+    if rpy is None or len(rpy) < 2:
+        return None
+    value = rpy[1]
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _restrict_polynomial(polynomial: Any, end: float) -> Any:
+    """把样条限制到 [x0, end]：整段区间系数照搬，最后一段换基到新端点。
+
+    scipy 的 `PPoly` 没有 slice 方法（1.16 也没有），所以自己换基：
+    区间内的写法是 p(t) = Σ c_j (t - x_i)^j，令 u = t - end 就有
+    t - x_i = u + shift，展开后 new[m] = Σ_{j≥m} c_j C(j,m) shift^(j-m)。
+    """
+    x = np.asarray(polynomial.x, dtype=float)
+    c = np.asarray(polynomial.c, dtype=float)
+    interval = int(np.searchsorted(x, end, side="right")) - 1
+    interval = min(max(interval, 0), len(x) - 2)
+    shift = end - x[interval]
+    if shift <= 0:
+        # end 正好落在断点上：前面那些整段原样保留。
+        return PPoly(
+            c[:, :interval], x[: interval + 1], extrapolate=polynomial.extrapolate
+        )
+    degree = c.shape[0] - 1
+    # c 的形状是 (阶数, 区间数, 关节维度)，最后一段要按每个关节分别换基。
+    last = np.zeros_like(c[:, interval])
+    for j in range(degree + 1):
+        for m in range(j + 1):
+            last[m] += c[j, interval] * comb(j, m) * shift ** (j - m)
+    new_x = np.concatenate([x[: interval + 1], [end]])
+    new_c = np.concatenate([c[:, :interval], last[:, None, :]], axis=1)
+    return PPoly(new_c, new_x, extrapolate=polynomial.extrapolate)
+
+
+def _truncate(trajectory: Any, elapsed: float) -> Trajectory | None:
+    """把轨迹截成"已经播过的那一段"，用来让动作停在当前这一刻。
+
+    studio 下一帧再采样这条轨迹时，采样时刻已经越过它的时长，于是它认为
+    这一段播完了（动作停住、目标角保持在当前位置，不会跳）。
+    """
+    if trajectory is None:
+        return None
+    duration = float(getattr(trajectory, "duration", 0.0))
+    if not 0.05 < elapsed < duration:
+        return None
+    polynomial = _restrict_polynomial(trajectory.polynomial, elapsed)
+    position = np.asarray(polynomial(elapsed), dtype=float)
+    return Trajectory(polynomial, elapsed, trajectory.first_q, position)
 
 
 def measured_pose_provider(hub: Any):

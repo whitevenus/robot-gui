@@ -25,6 +25,7 @@ from .control import (
 )
 from .fsm import FsmError, FsmService, FsmSettings
 from .gravity import GravityFeedforward, default_model_path
+from .records import RecordStore, RecordStoreError
 from .sdk_runtime import describe_crc_status, ensure_crc_libraries
 from .telemetry import TelemetryHub
 
@@ -53,8 +54,6 @@ if not _crc_ready:
 else:
     logger.info("{}", describe_crc_status())
 
-AUDIO_DIR_NAME = "audio"
-
 
 @dataclass(frozen=True)
 class RuntimeSettings:
@@ -69,7 +68,11 @@ class RuntimeSettings:
     fsm_whitelist: tuple[int, ...] = (501,)
     gains_path: Path | None = None
     transition_seconds: float = 2.0
+    #: 速度的**默认值**。实际每一把的速度由页面上的下拉给出（回放接口的 speed 参数），
+    #: 这个值只是下拉的初始项。
     replay_speed: float = 1.0
+    #: 执行记录目录：每次真机回放落一份 JSON 在这里，不上数据库。
+    records_dir: Path | None = None
     audio_app_name: str = "robot-gui"
     audio_enabled: bool = False
     gravity_compensation: bool = True
@@ -110,6 +113,10 @@ class RuntimeSettings:
             gains_path=Path(gains) if gains else None,
             transition_seconds=float(os.getenv("ROBOT_GUI_TRANSITION_SECONDS", "2.0")),
             replay_speed=float(os.getenv("ROBOT_GUI_REPLAY_SPEED", "1.0")),
+            records_dir=Path(
+                os.getenv("ROBOT_GUI_RECORDS_DIR")
+                or str(PROJECT_ROOT / "logs" / "records")
+            ),
             audio_app_name=os.getenv("ROBOT_GUI_AUDIO_APP", "robot-gui"),
             audio_enabled=os.getenv("ROBOT_GUI_AUDIO_ENABLED", "false").strip().lower()
             in {"1", "true", "yes", "on"},
@@ -180,6 +187,9 @@ def create_app(
         if runtime_settings.gravity_compensation
         else None
     )
+    records = RecordStore(
+        runtime_settings.records_dir or (PROJECT_ROOT / "logs" / "records")
+    )
     control = ControlService(
         settings=ControlSettings(
             interface=runtime_settings.dds_interface or "",
@@ -195,6 +205,7 @@ def create_app(
         action_store=store,
         audio_port=audio_port,
         feedforward=feedforward,
+        records=records,
     )
     fsm = FsmService(
         settings=FsmSettings.from_env(runtime_settings.fsm_modes),
@@ -254,6 +265,7 @@ def create_app(
     app.state.telemetry_adapter = adapter
     app.state.action_store = store
     app.state.control = control
+    app.state.records = records
 
     # ---- 只读遥测 ----
 
@@ -339,6 +351,7 @@ def create_app(
 
         - `{"action": "p1_s2"}`：单个动作（调试用）
         - `{"course": true}`：按 `data/course.json` 的顺序播整套
+        - `{"speed": 0.8}`：这一把的速度倍率（页面上的下拉），可选
 
         整套是一条连续轨迹：动作之间是规划出来的衔接段，讲解语音按每个动作在
         轨迹里的起始时刻拼成一条连续的 PCM。
@@ -346,6 +359,11 @@ def create_app(
         confirmed = payload.get("confirmed") is True
         requested = payload.get("audio")
         explicit = isinstance(requested, str) and bool(requested)
+        speed = payload.get("speed")
+        if speed is not None and (
+            isinstance(speed, bool) or not isinstance(speed, (int, float))
+        ):
+            raise _error("replay_speed_invalid", "speed 必须是数字。", status=400)
         if payload.get("course") is True:
             try:
                 names = list(store.load_course().actions)
@@ -353,6 +371,7 @@ def create_app(
                 raise _error(error.code, str(error), status=404) from error
             # 整套播放时每段用同名语音；显式指定的 audio 只对单动作有意义。
             explicit = False
+            kind = "course"
         else:
             action = payload.get("action")
             if not isinstance(action, str) or not action:
@@ -360,6 +379,7 @@ def create_app(
                     "action_required", "缺少要回放的动作名 action。", status=400
                 )
             names = [action]
+            kind = "action"
         # 未显式指定语音时，自动用与动作同名的 PCM，让讲解和手势一起播；
         # 找不到就安静地不播语音（不做 TTS 兜底）。
         clips: dict[str, bytes] = {}
@@ -373,13 +393,57 @@ def create_app(
                 names,
                 confirmed=confirmed,
                 audio_clips=clips,
+                speed=speed,
+                kind=kind,
             )
+        except ControlError as error:
+            raise _error(error.code, str(error)) from error
+
+    @app.post("/api/v1/control/pause")
+    async def pause() -> dict[str, Any]:
+        """暂停当前回放：停语音、平滑交还控制权，并记住续播的位置。"""
+        try:
+            return await asyncio.to_thread(control.pause)
+        except ControlError as error:
+            raise _error(error.code, str(error)) from error
+
+    @app.post("/api/v1/control/resume")
+    async def resume() -> dict[str, Any]:
+        """从暂停处继续：按当前实测姿态重新规划，只播还没播完的那几段。"""
+        try:
+            return await asyncio.to_thread(control.resume)
         except ControlError as error:
             raise _error(error.code, str(error)) from error
 
     @app.post("/api/v1/control/release")
     async def release() -> dict[str, Any]:
         return control.release()
+
+    # ---- 执行记录 ----
+
+    @app.get("/api/v1/records")
+    async def list_records() -> dict[str, Any]:
+        return {"records": records.list()}
+
+    @app.get("/api/v1/records/{record_id}")
+    async def read_record(record_id: str) -> dict[str, Any]:
+        try:
+            return records.read(record_id)
+        except RecordStoreError as error:
+            raise _error(error.code, str(error), status=404) from error
+
+    @app.get("/api/v1/records/{record_id}/download")
+    async def download_record(record_id: str) -> Response:
+        try:
+            record = records.read(record_id)
+        except RecordStoreError as error:
+            raise _error(error.code, str(error), status=404) from error
+        body = json.dumps(record, ensure_ascii=False, allow_nan=False, indent=2)
+        return Response(
+            content=body.encode("utf-8"),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{record_id}.json"'},
+        )
 
     # ---- FSM 运动模式 ----
 
@@ -421,19 +485,16 @@ def _read_audio(store: ActionStore, name: str, required: bool = False) -> bytes 
     未显式指定语音时是「尽力而为」：找不到就安静地不播语音，而不是让回放失败。
     显式指定了却找不到才算错误。
     """
-    directory = store.data_dir
-    if directory is None:
+    if store.data_dir is None:
         if required:
             raise _error(
                 "action_store_not_configured", "未配置 ROBOT_GUI_DATA_DIR。", status=503
             )
         return None
-    path = directory / AUDIO_DIR_NAME / f"{name}.pcm"
-    if not path.is_file():
-        if required:
-            raise _error("audio_not_found", f"找不到音频 {name}.pcm。", status=404)
-        return None
-    return path.read_bytes()
+    pcm = store.read_audio(name)
+    if pcm is None and required:
+        raise _error("audio_not_found", f"找不到音频 {name}.pcm。", status=404)
+    return pcm
 
 
 app = create_app()

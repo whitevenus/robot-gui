@@ -96,6 +96,48 @@ class TelemetryHub:
                 angles[name] = float(value)
         return angles or None
 
+    def latest_joint_modes(self) -> dict[str, int] | None:
+        """最近一次 LowState 的电机 mode 回读，按产品 schema 的关节名索引。
+
+        执行记录要留着腰 12/13/14 的 mode 回读：它是"腰到底有没有被接管"的
+        现场证据（per-motor mode 写 0 或 1 对腰的行为没有区别，见 control.py）。
+        """
+        with self._lock:
+            sample = self._samples.get("low_state")
+            if sample is None or sample.error or not sample.data:
+                return None
+            joints = sample.data.get("joints")
+        if not isinstance(joints, list):
+            return None
+        modes: dict[str, int] = {}
+        for item in joints:
+            if not isinstance(item, dict):
+                continue
+            slot = item.get("sdk_slot")
+            value = item.get("mode")
+            if not isinstance(slot, int) or not isinstance(value, int):
+                continue
+            name = _JOINT_NAME_BY_SLOT.get(slot)
+            if name is not None:
+                modes[name] = value
+        return modes or None
+
+    def latest_imu_rpy(self) -> tuple[list[float] | None, list[float] | None]:
+        """最近的髋部 / 躯干 IMU 姿态角（弧度），给执行记录的时间序列用。
+
+        顺序固定为 (髋部, 躯干)，与遥测快照里的字段一致。
+        """
+        with self._lock:
+            samples = {
+                name: self._samples.get(name) for name in ("hip_imu", "torso_imu")
+            }
+        result: list[list[float] | None] = []
+        for sample in samples.values():
+            data = None if sample is None or sample.error else sample.data
+            rpy = data.get("rpy") if isinstance(data, dict) else None
+            result.append(rpy if isinstance(rpy, list) else None)
+        return result[0], result[1]
+
     def snapshot(
         self,
         mode: str,

@@ -2,12 +2,22 @@ import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 
 import { readError } from "./api";
 import { ActionWorkbench } from "./ActionWorkbench";
+import { ExecutionRecords } from "./ExecutionRecords";
 import { FsmPanel, fsmModeLabel, type FsmModeInfo, type FsmState } from "./FsmPanel";
 import { JointPanel, type JointRow } from "./JointPanel";
 
 const G1Viewer = lazy(() =>
   import("./G1Viewer").then((module) => ({ default: module.G1Viewer })),
 );
+
+interface BmsReading {
+  soc_pct: number;
+  soh_pct: number;
+  current_raw: number;
+  voltage_raw: number[];
+  temperature_raw: number[];
+  cycle_count: number;
+}
 
 interface TelemetrySnapshot {
   schema_version: string;
@@ -34,14 +44,7 @@ interface TelemetrySnapshot {
     joint_count: number;
     mode_machine: number | null;
     joints: JointRow[];
-    bms: {
-      soc_pct: number;
-      soh_pct: number;
-      current_raw: number;
-      voltage_raw: number[];
-      temperature_raw: number[];
-      cycle_count: number;
-    } | null;
+    bms: BmsReading | null;
     hip_imu: { rpy: number[] } | null;
     torso_imu: { rpy: number[] } | null;
     fsm: { id: number | null; mode: string | null } | null;
@@ -121,6 +124,71 @@ function validChannels(value: number[] | null | undefined): number[] {
   return value.filter((item) => item !== 0);
 }
 
+type View = "console" | "records";
+type SourceState = TelemetrySnapshot["sources"][string]["state"];
+
+interface TelemetryBadgesProps {
+  bms: BmsReading | null;
+  bmsState: SourceState;
+  bmsAge: number | null;
+  hipImuRpy: number[] | null | undefined;
+  hipImuState: SourceState;
+  hipImuAge: number | null;
+  torsoImuRpy: number[] | null | undefined;
+  torsoImuState: SourceState;
+  torsoImuAge: number | null;
+}
+
+/**
+ * 顶部的遥测小徽标：电池与两路 IMU 的新鲜度和读数。
+ *
+ * 这些量以前挤在左侧导航里，导航一多就没地方放；收成徽标后导航只留页面切换，
+ * 常用的状态读数仍在视线高度。
+ */
+function TelemetryBadges(props: TelemetryBadgesProps) {
+  const {
+    bms,
+    bmsState,
+    bmsAge,
+    hipImuRpy,
+    hipImuState,
+    hipImuAge,
+    torsoImuRpy,
+    torsoImuState,
+    torsoImuAge,
+  } = props;
+  const bmsTemperature = bms ? validChannels(bms.temperature_raw).join(", ") : "";
+
+  return (
+    <div className="telemetry-badges" role="region" aria-label="遥测摘要">
+      <span className="tbadge" title={bmsTemperature ? `温度 ${bmsTemperature}` : ""}>
+        <span className="tbadge-label">电池</span>
+        <span className={`src-state state-${bmsState}`}>
+          {sourceStateLabel(bmsState)}
+        </span>
+        <b>{bms ? `${bms.soc_pct}% SOC · SOH ${bms.soh_pct}%` : "—"}</b>
+        {bmsAge !== null && <span className="src-age">{bmsAge} ms</span>}
+      </span>
+      <span className="tbadge">
+        <span className="tbadge-label">髋部 IMU</span>
+        <span className={`src-state state-${hipImuState}`}>
+          {sourceStateLabel(hipImuState)}
+        </span>
+        <b>{formatVector(hipImuRpy)}</b>
+        {hipImuAge !== null && <span className="src-age">{hipImuAge} ms</span>}
+      </span>
+      <span className="tbadge">
+        <span className="tbadge-label">躯干 IMU</span>
+        <span className={`src-state state-${torsoImuState}`}>
+          {sourceStateLabel(torsoImuState)}
+        </span>
+        <b>{formatVector(torsoImuRpy)}</b>
+        {torsoImuAge !== null && <span className="src-age">{torsoImuAge} ms</span>}
+      </span>
+    </div>
+  );
+}
+
 export function App() {
   const [snapshot, setSnapshot] = useState<TelemetrySnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -130,6 +198,7 @@ export function App() {
   const [fsmState, setFsmState] = useState<FsmState | null>(null);
   const [fsmBusy, setFsmBusy] = useState(false);
   const [fsmMessage, setFsmMessage] = useState("");
+  const [view, setView] = useState<View>("console");
 
   useEffect(() => {
     let socket: WebSocket | null = null;
@@ -276,7 +345,6 @@ export function App() {
   const inWhitelist = fsmId !== null && whitelistKnown && whitelist.includes(fsmId);
   const controlsAvailable = snapshot?.capabilities.controls.available === true;
   const bms = snapshot?.robot?.bms ?? null;
-  const bmsTemperature = bms ? validChannels(bms.temperature_raw).join(", ") : "";
 
   const alerts: { tone: "warn" | "bad"; text: string }[] = [];
   if (error) {
@@ -312,65 +380,26 @@ export function App() {
         </div>
 
         <nav className="nav">
-          <span className="nav-label">工作区</span>
-          <a className="nav-item active" href="#overview" aria-current="location">
+          <span className="nav-label">页面</span>
+          <button
+            type="button"
+            className={`nav-item${view === "console" ? " active" : ""}`}
+            aria-current={view === "console" ? "page" : undefined}
+            onClick={() => setView("console")}
+          >
             <span className="nav-pill">WS</span>
-            <span>总览</span>
-          </a>
-          <a className="nav-item" href="#joint-panel">
-            <span className="nav-pill">JD</span>
-            <span>姿态与关节</span>
-          </a>
-          <a className="nav-item" href="#action-panel">
-            <span className="nav-pill">AC</span>
-            <span>动作库</span>
-          </a>
+            <span>控制台总览</span>
+          </button>
+          <button
+            type="button"
+            className={`nav-item${view === "records" ? " active" : ""}`}
+            aria-current={view === "records" ? "page" : undefined}
+            onClick={() => setView("records")}
+          >
+            <span className="nav-pill">TR</span>
+            <span>执行轨迹记录</span>
+          </button>
         </nav>
-
-        <section className="side-summary" aria-label="遥测摘要">
-          <span className="nav-label">遥测摘要</span>
-          <dl>
-            <div>
-              <dt>
-                电池{" "}
-                <span className={`src-state state-${bmsState}`}>
-                  {sourceStateLabel(bmsState)}
-                </span>
-                {bmsAge !== null && <span className="src-age">{bmsAge} ms</span>}
-              </dt>
-              <dd>
-                {bms ? `${bms.soc_pct}% SOC · SOH ${bms.soh_pct}%` : "—"}
-                {bmsTemperature && (
-                  <span className="side-sub">温度 {bmsTemperature}</span>
-                )}
-              </dd>
-            </div>
-            <div>
-              <dt>
-                髋部 IMU{" "}
-                <span className={`src-state state-${hipImuState}`}>
-                  {sourceStateLabel(hipImuState)}
-                </span>
-                {hipImuAge !== null && (
-                  <span className="src-age">{hipImuAge} ms</span>
-                )}
-              </dt>
-              <dd>{formatVector(snapshot?.robot?.hip_imu?.rpy)}</dd>
-            </div>
-            <div>
-              <dt>
-                躯干 IMU{" "}
-                <span className={`src-state state-${torsoImuState}`}>
-                  {sourceStateLabel(torsoImuState)}
-                </span>
-                {torsoImuAge !== null && (
-                  <span className="src-age">{torsoImuAge} ms</span>
-                )}
-              </dt>
-              <dd>{formatVector(snapshot?.robot?.torso_imu?.rpy)}</dd>
-            </div>
-          </dl>
-        </section>
 
         <div className="side-note">
           <span
@@ -396,113 +425,138 @@ export function App() {
         </div>
       </aside>
 
-      <div className="main" id="overview">
+      <div className={`main${view === "records" ? " main-records" : ""}`} id="overview">
         <header className="main-head">
           <div>
-            <p className="eyebrow">Live Telemetry</p>
-            <h1>机器人状态工作台</h1>
+            <p className="eyebrow">
+              {view === "console" ? "Live Telemetry" : "Execution Trace"}
+            </p>
+            <h1>
+              {view === "console" ? "机器人状态工作台" : "执行轨迹记录"}
+            </h1>
           </div>
-          <span className="mode-badge" role="status">
-            {snapshot ? "REAL · 真实遥测" : "REAL · 等待连接"}
-          </span>
+          <div className="head-right">
+            <TelemetryBadges
+              bms={bms}
+              bmsState={bmsState}
+              bmsAge={bmsAge}
+              hipImuRpy={snapshot?.robot?.hip_imu?.rpy}
+              hipImuState={hipImuState}
+              hipImuAge={hipImuAge}
+              torsoImuRpy={snapshot?.robot?.torso_imu?.rpy}
+              torsoImuState={torsoImuState}
+              torsoImuAge={torsoImuAge}
+            />
+            <span className="mode-badge" role="status">
+              {snapshot ? "REAL · 真实遥测" : "REAL · 等待连接"}
+            </span>
+          </div>
         </header>
 
-        <section className="status-strip" aria-label="连接状态">
-          <div className="strip-item">
-            <span className="strip-label">运行模式</span>
-            <span className="strip-value">
-              真实遥测
-              {controlsAvailable && <span className="chip teal">真机控制</span>}
-            </span>
-            <span className="strip-sub">
-              {controlsAvailable ? "回放需逐次确认" : "只读，不下发命令"}
-            </span>
-          </div>
-          <div className="strip-item">
-            <span className="strip-label">DDS 连接</span>
-            <span
-              className={`strip-value ${
-                connectionLabel(snapshot, lowStateState) === "已连接"
-                  ? "ok"
-                  : "warn"
-              }`}
-            >
-              {connectionLabel(snapshot, lowStateState)}
-            </span>
-            <span className="strip-sub">
-              {snapshot?.connection.interface
-                ? `Unitree SDK2 / ${snapshot.connection.interface}`
-                : "等待后端上报网卡"}
-            </span>
-            <span className="strip-sub">
-              页面通道：{connected ? "WebSocket 已连接" : "WebSocket 未连接"}
-            </span>
-            <span className="strip-sub">
-              {snapshot?.connection.message ?? "等待后端状态"}
-            </span>
-          </div>
-          <div className="strip-item">
-            <span className="strip-label">数据年龄</span>
-            <span className={`strip-value ${lowStateState === "fresh" ? "ok" : "warn"}`}>
-              {sourceAge === undefined ? "—" : `${sourceAge} ms`}
-            </span>
-            <span className="strip-sub">
-              {snapshot?.connection.last_data_at
-                ? `最近 ${new Date(snapshot.connection.last_data_at).toLocaleTimeString()}`
-                : "尚未收到数据"}
-            </span>
-          </div>
-          <div className="strip-item">
-            <span className="strip-label">FSM 模式</span>
-            <span className={`strip-value ${inWhitelist ? "ok" : "warn"}`}>
-              {fsmLabel}
-              {fsmId !== null && <span className="chip teal">FSM {fsmId}</span>}
-            </span>
-            <span className="strip-sub">
-              {fsmId === null
-                ? "读不到 FSM 状态"
-                : !whitelistKnown
-                  ? "白名单未知（后端未提供运动模式接口）"
-                  : inWhitelist
-                    ? "白名单允许回放"
-                    : `不在白名单 [${whitelist.join(", ")}] 内`}
-            </span>
-          </div>
-        </section>
+        {view === "records" ? (
+          <ExecutionRecords />
+        ) : (
+          <>
+            <section className="status-strip" aria-label="连接状态">
+              <div className="strip-item">
+                <span className="strip-label">运行模式</span>
+                <span className="strip-value">
+                  真实遥测
+                  {controlsAvailable && <span className="chip teal">真机控制</span>}
+                </span>
+                <span className="strip-sub">
+                  {controlsAvailable ? "回放需逐次确认" : "只读，不下发命令"}
+                </span>
+              </div>
+              <div className="strip-item">
+                <span className="strip-label">DDS 连接</span>
+                <span
+                  className={`strip-value ${
+                    connectionLabel(snapshot, lowStateState) === "已连接"
+                      ? "ok"
+                      : "warn"
+                  }`}
+                >
+                  {connectionLabel(snapshot, lowStateState)}
+                </span>
+                <span className="strip-sub">
+                  {snapshot?.connection.interface
+                    ? `Unitree SDK2 / ${snapshot.connection.interface}`
+                    : "等待后端上报网卡"}
+                </span>
+                <span className="strip-sub">
+                  页面通道：{connected ? "WebSocket 已连接" : "WebSocket 未连接"}
+                </span>
+                <span className="strip-sub">
+                  {snapshot?.connection.message ?? "等待后端状态"}
+                </span>
+              </div>
+              <div className="strip-item">
+                <span className="strip-label">数据年龄</span>
+                <span
+                  className={`strip-value ${lowStateState === "fresh" ? "ok" : "warn"}`}
+                >
+                  {sourceAge === undefined ? "—" : `${sourceAge} ms`}
+                </span>
+                <span className="strip-sub">
+                  {snapshot?.connection.last_data_at
+                    ? `最近 ${new Date(snapshot.connection.last_data_at).toLocaleTimeString()}`
+                    : "尚未收到数据"}
+                </span>
+              </div>
+              <div className="strip-item">
+                <span className="strip-label">FSM 模式</span>
+                <span className={`strip-value ${inWhitelist ? "ok" : "warn"}`}>
+                  {fsmLabel}
+                  {fsmId !== null && <span className="chip teal">FSM {fsmId}</span>}
+                </span>
+                <span className="strip-sub">
+                  {fsmId === null
+                    ? "读不到 FSM 状态"
+                    : !whitelistKnown
+                      ? "白名单未知（后端未提供运动模式接口）"
+                      : inWhitelist
+                        ? "白名单允许回放"
+                        : `不在白名单 [${whitelist.join(", ")}] 内`}
+                </span>
+              </div>
+            </section>
 
-        {alerts.map((alert) => (
-          <div className={`alert ${alert.tone}`} key={alert.text} role="status">
-            <span className="icon" aria-hidden="true">
-              !
-            </span>
-            <span>{alert.text}</span>
-          </div>
-        ))}
+            {alerts.map((alert) => (
+              <div className={`alert ${alert.tone}`} key={alert.text} role="status">
+                <span className="icon" aria-hidden="true">
+                  !
+                </span>
+                <span>{alert.text}</span>
+              </div>
+            ))}
 
-        <div className="verify">
-          <Suspense
-            fallback={
-              <section className="card" aria-label="G1 三维姿态模型">
-                <p className="empty-cell" role="status">
-                  正在加载三维姿态工作台…
-                </p>
-              </section>
-            }
-          >
-            <G1Viewer
-              joints={snapshot?.robot?.joints ?? []}
-              hipImuRpy={snapshot?.robot?.hip_imu?.rpy ?? null}
-              hipImuAgeMs={hipImuAge}
-              hipImuState={hipImuState}
-              lowStateAgeMs={sourceAge ?? null}
-              lowStateState={lowStateState}
-              modeMachine={snapshot?.robot?.mode_machine ?? null}
-            />
-          </Suspense>
-          <div id="joint-panel">
-            <JointPanel joints={snapshot?.robot?.joints ?? []} />
-          </div>
-        </div>
+            <div className="verify">
+              <Suspense
+                fallback={
+                  <section className="card" aria-label="G1 三维姿态模型">
+                    <p className="empty-cell" role="status">
+                      正在加载三维姿态工作台…
+                    </p>
+                  </section>
+                }
+              >
+                <G1Viewer
+                  joints={snapshot?.robot?.joints ?? []}
+                  hipImuRpy={snapshot?.robot?.hip_imu?.rpy ?? null}
+                  hipImuAgeMs={hipImuAge}
+                  hipImuState={hipImuState}
+                  lowStateAgeMs={sourceAge ?? null}
+                  lowStateState={lowStateState}
+                  modeMachine={snapshot?.robot?.mode_machine ?? null}
+                />
+              </Suspense>
+              <div id="joint-panel">
+                <JointPanel joints={snapshot?.robot?.joints ?? []} />
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       <aside className="rail" aria-label="控制列">

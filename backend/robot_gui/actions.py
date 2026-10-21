@@ -169,6 +169,15 @@ class ActionStore:
             return False
         return (self._data_dir / AUDIO_DIR_NAME / f"{name}.pcm").is_file()
 
+    def read_audio(self, name: str) -> bytes | None:
+        """读同名语音；没有就返回 None（安静地不播，而不是让回放失败）。"""
+        if self._data_dir is None:
+            return None
+        path = self._data_dir / AUDIO_DIR_NAME / f"{name}.pcm"
+        if not path.is_file():
+            return None
+        return path.read_bytes()
+
     def _validate(self, name: str, payload: bytes) -> Action:
         """用 g1-action-studio 的加载器做权威校验；它要求文件路径，这里走临时文件。"""
         directory = self._require_dir()

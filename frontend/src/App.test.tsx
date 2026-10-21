@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
 import { App } from "./App";
 
@@ -111,6 +111,9 @@ beforeEach(() => {
       trajectory_duration_s: 0,
       audio_playing: false,
       gravity_compensation: false,
+      default_speed: 1,
+      current_speed: 1,
+      resume_actions: [],
     },
     "/api/v1/fsm/state": {
       available: true,
@@ -269,7 +272,153 @@ describe("Real telemetry workstation", () => {
     );
     expect(call).toBeDefined();
     const init = call?.[1] as RequestInit | undefined;
-    expect(JSON.parse(String(init?.body))).toEqual({ course: true, confirmed: true });
+    // 速度由页面上的下拉给出，不再靠环境变量。
+    expect(JSON.parse(String(init?.body))).toEqual({
+      course: true,
+      confirmed: true,
+      speed: 1,
+    });
+  });
+
+  it("sends the speed picked in the dropdown with the replay request", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const fetchMock = stubFetch({
+      "/api/v1/actions": {
+        actions: [
+          {
+            name: "p1_s0",
+            group: "arms",
+            frames: 98,
+            duration_s: 4.9,
+            source: "echo-g",
+            has_audio: true,
+          },
+        ],
+        course: { name: "stage_c", actions: ["p1_s0", "p2_s1"] },
+      },
+      "/api/v1/control/state": {
+        phase: "idle",
+        message: "",
+        action: "",
+        error_code: "",
+        available: true,
+        trajectory_duration_s: 0,
+        audio_playing: false,
+        gravity_compensation: false,
+        default_speed: 1,
+        current_speed: 1,
+        resume_actions: [],
+      },
+      "/api/v1/control/replay": { phase: "planning", action: "整套 2 段" },
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<App />);
+
+    const speedSelect = await screen.findByLabelText("回放速度");
+    await act(async () => {
+      fireEvent.change(speedSelect, { target: { value: "0.8" } });
+    });
+
+    const courseButton = screen.getByRole("button", { name: /回放整套/ });
+    await act(async () => {
+      courseButton.click();
+    });
+
+    const call = fetchMock.mock.calls.find(([url]) =>
+      String(url).endsWith("/api/v1/control/replay"),
+    );
+    const init = call?.[1] as RequestInit | undefined;
+    expect(JSON.parse(String(init?.body)).speed).toBe(0.8);
+  });
+
+  it("lists execution records and opens one on click", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    stubFetch({
+      "/api/v1/actions": { actions: [] },
+      "/api/v1/records": {
+        records: [
+          {
+            id: "20261021T091240Z-p1_s2",
+            kind: "action",
+            label: "p1_s2",
+            actions: ["p1_s2"],
+            speed: 0.8,
+            started_at: "2026-10-21T09:12:40+00:00",
+            finished_at: "2026-10-21T09:12:52+00:00",
+            elapsed_s: 12.3,
+            trajectory_duration_s: 8.9,
+            outcome: "completed",
+            error_code: "",
+            waist_pitch_lean_deg: 4.02,
+            max_drift_deg: 0.31,
+            violated: false,
+            sample_count: 232,
+          },
+        ],
+      },
+      "/api/v1/records/20261021T091240Z-p1_s2": {
+        id: "20261021T091240Z-p1_s2",
+        kind: "action",
+        label: "p1_s2",
+        actions: ["p1_s2"],
+        speed: 0.8,
+        started_at: "2026-10-21T09:12:40+00:00",
+        finished_at: "2026-10-21T09:12:52+00:00",
+        elapsed_s: 12.3,
+        trajectory_duration_s: 8.9,
+        outcome: "completed",
+        error_code: "",
+        error_message: "",
+        segments: [{ name: "p1_s2", start_s: 2 }],
+        tracking: {
+          samples: 100,
+          joints: {
+            left_shoulder_pitch: {
+              max_error_rad: 0.146,
+              mean_error_rad: 0.02,
+              target_rad: 0.1,
+              measured_rad: 0.05,
+            },
+          },
+        },
+        lower_body: {
+          threshold_deg: 5,
+          max_drift_deg: 0.31,
+          max_drift_joint: "left_hip_pitch",
+          waist_pitch_lean_deg: 4.02,
+          waist_pitch_drift_deg: 5.43,
+          violated: false,
+        },
+        samples: [
+          { t: 0, waist_pitch: -0.02, waist_modes: [1, 1, 1], torso_pitch: 0.01, hip_pitch: 0.02 },
+          { t: 0.5, waist_pitch: 0.01, waist_modes: [1, 1, 1], torso_pitch: 0.02, hip_pitch: 0.02 },
+        ],
+      },
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      screen.getByRole("button", { name: /执行轨迹记录/ }).click();
+    });
+
+    const row = await screen.findByText("p1_s2");
+    expect(row).toBeInTheDocument();
+
+    await act(async () => {
+      row.click();
+    });
+
+    const detail = await screen.findByRole("region", { name: "执行记录详情" });
+    expect(within(detail).getByText("20261021T091240Z-p1_s2")).toBeInTheDocument();
+    expect(within(detail).getByText(/腰 14 前倾峰值/)).toBeInTheDocument();
+    expect(
+      within(detail).getByRole("link", { name: /下载 JSON/ }),
+    ).toHaveAttribute(
+      "href",
+      "/api/v1/records/20261021T091240Z-p1_s2/download",
+    );
   });
 
   it("shows the real SDK2/DDS source and connection state", () => {

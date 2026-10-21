@@ -25,6 +25,9 @@ interface ControlState {
   trajectory_duration_s: number;
   audio_playing: boolean;
   gravity_compensation: boolean;
+  default_speed: number;
+  current_speed: number;
+  resume_actions: string[];
 }
 
 const PHASE_LABELS: Record<string, string> = {
@@ -32,9 +35,13 @@ const PHASE_LABELS: Record<string, string> = {
   planning: "规划中",
   acquiring: "接管中",
   playing: "回放中",
+  paused: "已暂停",
   releasing: "交还控制权",
   fault: "故障",
 };
+
+/** 速度下拉的档位。1.0 是原速，往下是慢放。 */
+const SPEED_OPTIONS = [0.5, 0.6, 0.8, 1.0, 1.2, 1.5];
 
 export function ActionWorkbench() {
   const [actions, setActions] = useState<ActionSummary[]>([]);
@@ -45,6 +52,7 @@ export function ActionWorkbench() {
   const [importBody, setImportBody] = useState("");
   const [selected, setSelected] = useState("");
   const [busy, setBusy] = useState(false);
+  const [speed, setSpeed] = useState<number | null>(null);
 
   const refreshActions = useCallback(async () => {
     try {
@@ -81,10 +89,20 @@ export function ActionWorkbench() {
     return () => window.clearInterval(timer);
   }, [refreshActions, refreshState]);
 
-  const busyControl = useMemo(
-    () => state !== null && state.phase !== "idle" && state.phase !== "fault",
+  const running = useMemo(
+    () =>
+      state !== null &&
+      ["planning", "acquiring", "playing", "releasing"].includes(state.phase),
     [state],
   );
+  const paused = state?.phase === "paused";
+  // 速度默认取后端配置的默认值（ROBOT_GUI_REPLAY_SPEED），页面上随时能改。
+  const effectiveSpeed = speed ?? state?.default_speed ?? 1;
+  const speedOptions = useMemo(() => {
+    const options = new Set(SPEED_OPTIONS);
+    options.add(Number((state?.default_speed ?? 1).toFixed(2)));
+    return [...options].sort((first, second) => first - second);
+  }, [state?.default_speed]);
 
   async function runImport() {
     setBusy(true);
@@ -134,7 +152,7 @@ export function ActionWorkbench() {
   async function runReplay(name: string, withAudio: boolean) {
     if (
       !window.confirm(
-        `即将在真机上回放 ${name}。请确认现场安全、机器人处于允许的 FSM 模式，且随时可以按停止。`,
+        `即将在真机上回放 ${name}（速度 ${effectiveSpeed}×）。请确认现场安全、机器人处于允许的 FSM 模式，且随时可以按停止。`,
       )
     ) {
       return;
@@ -148,6 +166,7 @@ export function ActionWorkbench() {
         body: JSON.stringify({
           action: name,
           confirmed: true,
+          speed: effectiveSpeed,
           ...(withAudio ? { audio: name } : {}),
         }),
       });
@@ -165,7 +184,7 @@ export function ActionWorkbench() {
     if (!course) return;
     if (
       !window.confirm(
-        `即将在真机上连续回放整套课程「${course.name}」（${course.actions.length} 段）。`
+        `即将在真机上连续回放整套课程「${course.name}」（${course.actions.length} 段，速度 ${effectiveSpeed}×）。`
           + "整套是一次连续接管，中途需要停止请按停止按钮或遥控器。请确认现场安全、"
           + "机器人处于允许的 FSM 模式。",
       )
@@ -178,8 +197,42 @@ export function ActionWorkbench() {
       const response = await fetch("/api/v1/control/replay", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ course: true, confirmed: true }),
+        body: JSON.stringify({
+          course: true,
+          confirmed: true,
+          speed: effectiveSpeed,
+        }),
       });
+      if (!response.ok) {
+        setMessage(await readError(response));
+        return;
+      }
+      await refreshState();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runPause() {
+    setBusy(true);
+    setMessage("");
+    try {
+      const response = await fetch("/api/v1/control/pause", { method: "POST" });
+      if (!response.ok) {
+        setMessage(await readError(response));
+        return;
+      }
+      await refreshState();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runResume() {
+    setBusy(true);
+    setMessage("");
+    try {
+      const response = await fetch("/api/v1/control/resume", { method: "POST" });
       if (!response.ok) {
         setMessage(await readError(response));
         return;
@@ -270,11 +323,26 @@ export function ActionWorkbench() {
         )}
       </div>
 
+      <label className="speed-picker">
+        <span>回放速度</span>
+        <select
+          value={String(effectiveSpeed)}
+          onChange={(event) => setSpeed(Number(event.target.value))}
+          disabled={running || paused}
+        >
+          {speedOptions.map((option) => (
+            <option key={option} value={String(option)}>
+              {option}×
+            </option>
+          ))}
+        </select>
+      </label>
+
       {course && (
         <button
           type="button"
           className="btn btn-primary"
-          disabled={!available || busyControl || busy}
+          disabled={!available || running || paused || busy}
           onClick={() => void runCourse()}
         >
           确认并回放整套（{course.name} · {course.actions.length} 段）
@@ -283,7 +351,7 @@ export function ActionWorkbench() {
       <button
         type="button"
         className="btn btn-ghost"
-        disabled={!available || busyControl || busy || !selectedAction}
+        disabled={!available || running || paused || busy || !selectedAction}
         onClick={() => {
           if (!selectedAction) return;
           void runReplay(selectedAction.name, selectedAction.has_audio);
@@ -294,11 +362,43 @@ export function ActionWorkbench() {
       <button
         type="button"
         className="btn btn-ghost"
-        disabled={!busyControl}
+        disabled={!running || busy}
+        onClick={() => void runPause()}
+      >
+        暂停（回到接管姿态后交还控制权）
+      </button>
+      <button
+        type="button"
+        className="btn btn-ghost"
+        disabled={!paused || busy}
+        onClick={() => void runResume()}
+      >
+        {paused && (state?.resume_actions?.length ?? 0) > 0
+          ? `继续播放剩余 ${state?.resume_actions.length} 段`
+          : "继续播放"}
+      </button>
+      <button
+        type="button"
+        className="btn btn-ghost"
+        disabled={!running}
         onClick={() => void runRelease()}
       >
         停止并交还控制权
       </button>
+
+      {paused && (
+        <p className="rail-note">
+          已暂停：机器人已动态回到接管瞬间的姿态，控制权已交还。继续播放会从当前
+          实测姿态重新规划，
+          {(state?.resume_actions?.length ?? 0) > 0
+            ? `接着播 ${state?.resume_actions.join("、")}`
+            : "重播这一段"}
+          。
+        </p>
+      )}
+      {state && state.phase !== "idle" && state.phase !== "paused" && state.message && (
+        <p className="rail-note">{state.message}</p>
+      )}
 
       {state && (
         <div className="rail-flags">
@@ -309,6 +409,10 @@ export function ActionWorkbench() {
           <div>
             <span>执行范围</span>
             <b>双臂 14 维</b>
+          </div>
+          <div>
+            <span>本把速度</span>
+            <b>{state.current_speed}×</b>
           </div>
         </div>
       )}

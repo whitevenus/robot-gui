@@ -98,6 +98,12 @@ def main() -> int:
     parser.add_argument("--low-state-topic", default="rt/lowstate")
     parser.add_argument("--torso-imu-topic", default="rt/lf/secondary_imu")
     parser.add_argument("--arm-sdk-topic", default="rt/arm_sdk")
+    parser.add_argument(
+        "--stop-file",
+        type=Path,
+        default=None,
+        help="出现这个文件就提前收尾并写盘（回放结束后由 track 脚本创建）",
+    )
     args = parser.parse_args()
 
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
@@ -123,9 +129,14 @@ def main() -> int:
     rows: list[dict[str, Any]] = []
     started = time.monotonic()
     period = 1.0 / SAMPLE_HZ
+    stopped_early = False
     while True:
         elapsed = time.monotonic() - started
         if elapsed > args.seconds:
+            break
+        # 回放结束就收尾：采样窗口是估算值，实际时长由后端的轨迹长度决定。
+        if args.stop_file is not None and args.stop_file.exists():
+            stopped_early = True
             break
         snapshot = collector.snapshot()
         rows.append(
@@ -149,7 +160,8 @@ def main() -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
     counts = collector.snapshot()["counts"]
-    print(f"采样完成：{len(rows)} 行 → {args.out}（{counts}）")
+    tail = "（回放结束提前收尾）" if stopped_early else ""
+    print(f"采样完成：{len(rows)} 行 → {args.out}（{counts}）{tail}")
     return 0
 
 

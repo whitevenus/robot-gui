@@ -213,29 +213,6 @@ button {
   border-color: rgba(107, 231, 212, 0.34);
 }
 
-.side-summary dl {
-  display: grid;
-  gap: 10px;
-}
-
-.side-summary dt {
-  color: var(--muted-2);
-  font-size: 11px;
-}
-
-.side-summary dd {
-  margin: 0;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  color: var(--text);
-}
-
-.side-sub {
-  display: block;
-  color: var(--muted-2);
-  font-size: 11px;
-}
-
 .src-state {
   font-size: 10px;
   font-weight: 700;
@@ -991,6 +968,180 @@ button {
   }
 }
 
+/* ---------- 顶部遥测徽标 ---------- */
+.head-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.telemetry-badges {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.tbadge {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.tbadge-label {
+  color: var(--muted-2);
+  font-weight: 700;
+}
+
+.tbadge b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* ---------- 导航项（现在是页面切换按钮） ---------- */
+.nav-item {
+  width: 100%;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* ---------- 速度下拉 ---------- */
+.speed-picker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.speed-picker select {
+  padding: 4px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.speed-picker select:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* ---------- 执行轨迹记录 ---------- */
+.main-records {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.records-card,
+.record-detail {
+  min-height: 0;
+}
+
+.records-card .jt tbody tr {
+  cursor: pointer;
+}
+
+.records-card .jt tbody tr:hover {
+  background: rgba(107, 231, 212, 0.06);
+}
+
+.records-card .jt tbody tr.selected {
+  background: rgba(107, 231, 212, 0.1);
+}
+
+.record-body {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.record-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px 18px;
+}
+
+.record-facts dt {
+  color: var(--muted-2);
+  font-size: 11px;
+}
+
+.record-facts dd {
+  margin: 0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.record-subhead {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--muted);
+}
+
+.trace-chart {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.trace-chart svg {
+  width: 100%;
+  height: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+
+.chart-line {
+  stroke: var(--teal);
+  stroke-width: 1.6;
+}
+
+.chart-threshold {
+  stroke: var(--amber);
+  stroke-width: 1;
+  stroke-dasharray: 5 4;
+}
+
+.chart-peak {
+  fill: var(--amber);
+}
+
+.chart-axis {
+  fill: var(--muted-2);
+  font-size: 9px;
+}
+
+.trace-chart figcaption {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
 @media (max-width: 1180px) {
   .workstation {
     grid-template-columns: minmax(0, 1fr);
@@ -1024,13 +1175,8 @@ button {
   .nav-label {
     display: none;
   }
-  .side-summary {
-    flex: 1 1 100%;
-    order: 3;
-  }
-  .side-summary dl {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 10px 18px;
+  .nav-item {
+    width: auto;
   }
   .side-note {
     margin-top: 0;

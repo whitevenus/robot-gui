@@ -376,10 +376,20 @@ def test_replay_auto_picks_matching_audio(
 
     captured: dict[str, object] = {}
 
-    def recording_request_replay(self, action_names, *, confirmed, audio_clips=None):
+    def recording_request_replay(
+        self,
+        action_names,
+        *,
+        confirmed,
+        audio_clips=None,
+        speed=None,
+        kind="action",
+    ):
         captured["actions"] = list(action_names)
         captured["confirmed"] = confirmed
         captured["audio"] = (audio_clips or {}).get("demo")
+        captured["speed"] = speed
+        captured["kind"] = kind
         return self.state()
 
     app = real_test_app(tmp_path)
@@ -393,12 +403,32 @@ def test_replay_auto_picks_matching_audio(
             json={"name": "demo", "action": sample_action()},
         )
         response = client.post(
-            "/api/v1/control/replay", json={"action": "demo", "confirmed": True}
+            "/api/v1/control/replay",
+            json={"action": "demo", "confirmed": True, "speed": 0.8},
         )
 
     assert response.status_code == 200
     assert captured["actions"] == ["demo"]
     assert captured["audio"] == pcm
+    # 速度由页面的下拉传进来，不再靠环境变量。
+    assert captured["speed"] == 0.8
+    assert captured["kind"] == "action"
+
+
+def test_replay_rejects_a_non_numeric_speed(tmp_path: Path) -> None:
+    """速度必须是数字：写错的东西不能被当成"没传"悄悄放过去。"""
+    with TestClient(real_test_app(tmp_path)) as client:
+        client.post(
+            "/api/v1/actions/import",
+            json={"name": "demo", "action": sample_action()},
+        )
+        response = client.post(
+            "/api/v1/control/replay",
+            json={"action": "demo", "confirmed": True, "speed": "慢一点"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "replay_speed_invalid"
 
 
 def test_telemetry_snapshot_reports_controls_capability(tmp_path: Path) -> None:

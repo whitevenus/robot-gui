@@ -93,7 +93,8 @@ export ROBOT_GUI_TELEMETRY_HZ=10
 `start-control` 另外会设上 `ROBOT_GUI_CONTROLS_ENABLED=1`、
 `ROBOT_GUI_FSM_WHITELIST=501`、`ROBOT_GUI_AUDIO_ENABLED=1`。
 其余可调项（`ROBOT_GUI_TRANSITION_SECONDS`、`ROBOT_GUI_REPLAY_SPEED`、
-`ROBOT_GUI_HOLD_SOAK_S`）在 `config/env.sh` 里加。
+`ROBOT_GUI_HOLD_SOAK_S`、`ROBOT_GUI_RECORDS_DIR`）在 `config/env.sh` 里加。
+**速度不在这里调**：页面上有下拉，选的值会随回放请求一起发过去。
 
 | 变量 | 默认 | 含义 |
 |---|---|---|
@@ -105,8 +106,9 @@ export ROBOT_GUI_TELEMETRY_HZ=10
 | `ROBOT_GUI_FSM_WHITELIST` | `501` | 逗号分隔；不在列表内的 FSM 一律拒绝下发 |
 | `ROBOT_GUI_FSM_MODES` | 无 | 收窄允许切换的 FSM 模式 ID，逗号分隔，如 `0,1,4,501`。**留空 = 目录里的模式全部可点**；只有想收窄时才设 |
 | `ROBOT_GUI_TRANSITION_SECONDS` | `2.0` | 进入与返回的衔接段时长 |
-| `ROBOT_GUI_REPLAY_SPEED` | `1.0` | 动作速度倍率 |
+| `ROBOT_GUI_REPLAY_SPEED` | `1.0` | 速度下拉的**初始项**。实际每一把的速度由页面上的下拉给出（回放接口的 `speed` 参数），改这个变量不用重启也只影响下拉的默认值 |
 | `ROBOT_GUI_HOLD_SOAK_S` | `3.0` | 动作结束后的沉降观察窗口，见 [§6.1](#61-沉降窗口与前倾峰值) |
+| `ROBOT_GUI_RECORDS_DIR` | `<项目根>/logs/records` | 执行记录目录：每次真机回放落一份 JSON，不上数据库 |
 | `ROBOT_GUI_LOWER_BODY_DRIFT_DEG` | `5` | 下盘告警阈值：腿/腰 yaw-roll 看相对接管姿态的偏离，腰 14 看绝对前倾角峰值，见 [§6.1.1](#611-守卫口径腰-14-看绝对前倾腿看相对偏离) |
 | `ROBOT_GUI_AUDIO_APP` | `robot-gui` | 音频流的应用标识 |
 
@@ -185,6 +187,7 @@ bash tools/robot-gui.sh stop
 ```bash
 chmod +x tools/*.sh tools/*.py        # 一次性
 ./tools/robot-gui-track.sh p1_s2      # 回放 + 全程采样 + 判读摘要
+./tools/robot-gui-track.sh course 0.8 # 整套按 0.8 倍速播（速度与页面上那个下拉同口径）
 python3 tools/inspect_fsm.py eth0    # 读当前运动模式（fsm_id + fsm_mode）
 python3 tools/check_waist_locked.py eth0 --seconds 60   # 物理锁腰判别（要人掰）
 ```
@@ -193,7 +196,7 @@ python3 tools/check_waist_locked.py eth0 --seconds 60   # 物理锁腰判别（�
 |---|---|
 | `tools/robot-gui.sh` | 启停后端与前端，日志写 `logs/` |
 | `tools/robot-gui-track.sh` | 回放一次动作（或 `course` 播整套），打印跟踪误差、下盘守卫、腰 14 全程曲线 |
-| `tools/pose_sampler.py` | 全程姿态采样器（由 track.sh 调用，输出 `logs/pose_samples.json`） |
+| `tools/pose_sampler.py` | 全程姿态采样器（由 track.sh 调用，输出 `logs/pose_samples.json`；回放结束会提前收尾） |
 | `tools/inspect_fsm.py` | 读 `fsm_id` 与 `fsm_mode`（静态/运动） |
 | `tools/check_waist_locked.py` | 物理锁腰判别：腰掰不动 + 膝盖能掰动 = 装了固定件 |
 | `tools/play_audio.py` | 只放讲解语音，不动机器人（`p1_s2` 放一段，`--course` 放整套） |
@@ -219,11 +222,11 @@ python3 tools/check_waist_locked.py eth0 --seconds 60   # 物理锁腰判别（�
   回放期间会收不到 RPC 回包（见 §6.3）。
 
 ```bash
-./tools/robot-gui-track.sh course      # 整套 + 全程采样（窗口自动按整套时长拉长）
+./tools/robot-gui-track.sh course      # 整套 + 全程采样（窗口自动按整套时长与速度拉长）
 backend/.venv/bin/python tools/play_audio.py --course   # 只放整套语音，不动机器人
 ```
 
-页面上也有「确认并回放整套」按钮（课程清单存在时才出现）。
+页面上也有「确认并回放整套」按钮（课程清单存在时才出现），速度在右侧下拉里选。
 
 **2026-10-21 首次整套验收（`.165`，9 段，FSM 501）**：
 
