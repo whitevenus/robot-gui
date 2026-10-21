@@ -24,7 +24,7 @@ from test_real_telemetry import TelemetryTestAdapter
 
 
 def sample_action(frames: int = 4) -> dict[str, Any]:
-    """arms 组 = 只接管双臂的 14 维动作。"""
+    """arms 组 = 14 维动作（腰锁在接管瞬间的姿态，不执行腰轨迹）。"""
     return {
         "group": "arms",
         "frames": [

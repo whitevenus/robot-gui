@@ -56,28 +56,28 @@ const FSM_MODES = [
     label: "零力矩",
     danger: true,
     hint: "输出力矩恒为 0，机器人失去支撑，会瘫倒。",
-    allowed: false,
+    allowed: true,
   },
   {
     fsm_id: 1,
     label: "阻尼",
     danger: true,
     hint: "只有速度阻尼，没有支撑力矩，同样会瘫倒。",
-    allowed: false,
+    allowed: true,
   },
   {
     fsm_id: 4,
     label: "锁定站立",
     danger: false,
     hint: "纯弹簧-阻尼姿态保持，没有平衡控制，姿态偏了不会迈步救场。",
-    allowed: false,
+    allowed: true,
   },
   {
     fsm_id: 501,
     label: "常规运控",
     danger: false,
     hint: "内置平衡控制生效。",
-    allowed: false,
+    allowed: true,
   },
 ];
 
@@ -113,8 +113,8 @@ beforeEach(() => {
       gravity_compensation: false,
     },
     "/api/v1/fsm/state": {
-      available: false,
-      reason: "未配置允许切换的模式（ROBOT_GUI_FSM_MODES）。",
+      available: true,
+      reason: "",
       current: { id: null, name: "" },
       whitelist: [501],
       modes: FSM_MODES,
@@ -176,8 +176,8 @@ describe("Real telemetry workstation", () => {
     stubFetch({
       "/api/v1/actions": { actions: [] },
       "/api/v1/fsm/state": {
-        available: false,
-        reason: "未配置允许切换的模式（ROBOT_GUI_FSM_MODES）。",
+        available: true,
+        reason: "",
         current: { id: null, name: "" },
         whitelist: [501],
         modes: FSM_MODES,
@@ -277,12 +277,35 @@ describe("Real telemetry workstation", () => {
     expect(within(strip).getByText("白名单允许回放")).toBeInTheDocument();
   });
 
-  it("shows why mode switching is unavailable instead of dead buttons", async () => {
+  it("offers every catalogued mode without extra configuration", async () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<App />);
 
+    // 未配置 ROBOT_GUI_FSM_MODES 时，目录里的模式全部可点。
+    for (const label of ["零力矩", "阻尼", "锁定站立", "常规运控"]) {
+      expect(
+        await screen.findByRole("button", { name: new RegExp(`^${label}`) }),
+      ).toBeEnabled();
+    }
+  });
+
+  it("disables mode switching and says why when hardware controls are off", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    stubFetch({
+      "/api/v1/actions": { actions: [] },
+      "/api/v1/fsm/state": {
+        available: false,
+        reason: "真机控制未开启（ROBOT_GUI_CONTROLS_ENABLED=1）前不允许切换运动模式。",
+        current: { id: null, name: "" },
+        whitelist: [501],
+        modes: FSM_MODES.map((mode) => ({ ...mode, allowed: false })),
+      },
+    });
+
+    render(<App />);
+
     expect(
-      await screen.findByText(/模式切换未开放：未配置允许切换的模式/),
+      await screen.findByText(/前不允许切换运动模式/),
     ).toBeInTheDocument();
     for (const label of ["零力矩", "阻尼", "锁定站立", "常规运控"]) {
       expect(

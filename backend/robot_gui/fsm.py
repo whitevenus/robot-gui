@@ -97,8 +97,9 @@ MODES_BY_ID: dict[int, FsmMode] = {mode.fsm_id: mode for mode in FSM_MODES}
 class FsmSettings:
     """FSM 切换的运行配置。"""
 
-    #: 允许切换的模式 ID。为空表示切换能力关闭。
-    allowed: tuple[int, ...] = ()
+    #: 允许切换的模式 ID。**默认全部允许**——切换本身有操作员二次确认，
+    #: 门槛交给人和遥控器，不靠配置项。需要收窄时才设 `ROBOT_GUI_FSM_MODES`。
+    allowed: tuple[int, ...] | None = None
 
     @classmethod
     def from_env(cls, raw: str | None) -> "FsmSettings":
@@ -119,13 +120,18 @@ class FsmSettings:
                 )
                 continue
             allowed.append(fsm_id)
+        if not (raw or "").strip():
+            return cls(allowed=None)  # 未配置 = 全部允许
         return cls(allowed=tuple(allowed))
 
     @property
     def enabled(self) -> bool:
-        return bool(self.allowed)
+        """切换能力是否开放（未配置白名单时对目录里的模式全部开放）。"""
+        return True
 
     def permits(self, fsm_id: int) -> bool:
+        if self.allowed is None:
+            return fsm_id in MODES_BY_ID
         return fsm_id in self.allowed
 
 
@@ -161,8 +167,6 @@ class FsmService:
     def _reason(self) -> str:
         if not self._controls_enabled:
             return "真机控制未开启（ROBOT_GUI_CONTROLS_ENABLED=1）前不允许切换运动模式。"
-        if not self._settings.enabled:
-            return "未配置允许切换的模式（ROBOT_GUI_FSM_MODES）。"
         return ""
 
     def state(self) -> dict[str, Any]:
@@ -206,7 +210,7 @@ class FsmService:
             raise FsmError(
                 "fsm_mode_not_allowed",
                 f"模式 {mode.label}（{fsm_id}）不在允许列表 "
-                f"[{', '.join(str(item) for item in self._settings.allowed)}] 中。",
+                f"[{', '.join(str(item) for item in self._settings.allowed or ())}] 中。",
             )
         snapshot = self._telemetry.snapshot("real", None, None)
         if snapshot["sources"]["low_state"]["state"] != "fresh":

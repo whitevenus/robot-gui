@@ -67,8 +67,8 @@ interface FsmPanelProps {
  * 模式用官方的数字 ID 指定（`LocoClient.SetFsmId`），没有模式名要猜。
  *
  * 零力矩与阻尼会让机器人失去支撑力矩，站立中切换等于让它瘫倒，所以这两个按钮
- * 标成高风险并要求二次确认。切换能力默认关闭：后端没有配置允许的模式时，
- * 按钮显示原因而不是给一个点了没反应的样子。
+ * 标成高风险并要求二次确认。切换默认可用：目录里的模式都能点，安全与否由操作员
+ * 在现场判断（软件按钮不是物理急停，异常请用遥控器停机）。
  */
 export function FsmPanel({
   state,
@@ -116,7 +116,7 @@ export function FsmPanel({
             })}
           </div>
           {blocked && state.reason ? (
-            <p className="rail-reason">模式切换未开放：{state.reason}</p>
+            <p className="rail-reason">{state.reason}</p>
           ) : null}
         </>
       )}

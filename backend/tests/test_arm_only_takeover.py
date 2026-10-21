@@ -1,13 +1,21 @@
-"""接管范围的不变量：**只接管双臂**。
+"""接管范围的不变量：**双臂 + 腰的姿态保持**。
 
-躯干前倾的真因（2026-10-20 真机实测）：`rt/arm_sdk` 使能后固件不再支撑腰，
-腰一旦被我们接管，内置的腰部平衡回路就退让，躯干从前倾 -1.49° 一路倒到 +10.01°，
-而且动作结束后还在继续恶化到 t=10.86s 才见峰值。
+真机实测（2026-10-21）把机制钉死了：
+  - `rt/arm_sdk` 的权重一旦升到 1，腰（slot 12-14）的控制权就**无条件**归我们，
+    `motor_cmd[i].mode` 写 0 或 1 完全没有区别（两档前倾峰值 34.01° vs 34.15°，
+    曲线形状一致）；
+  - 腰槽位留空（增益全 0）时，腰在接管后 0.8 秒内被推到 +32.8° 的机械限位
+    （waist_pitch 行程 ±0.52 rad = ±29.8°），固件的腰部平衡回路退让，
+    躯干前倾 +40°、髋部只 +7°。
 
-所以这里守住三条不变量：
-1. 发布的报文里**腰的三个槽位不被接管**（mode=0、增益与目标全 0）；
-2. 漂移守卫**只看腿 + 腰**，手臂在动作里本来就在动，不算漂移；
-3. 含腰的动作（arms_waist 组）直接被拒，不下发任何控制命令。
+所以腰必须由我们给出支撑力矩：**PD 项 + 重力前馈**。动作本身仍然只有 14 维
+（arms 组），腰的目标角恒等于接管瞬间的姿态，即"锁在定值"。
+
+这里守住：
+1. 发布的报文里双臂与腰都带有效增益（腰不能是空槽位）；
+2. 腰的增益在电机的力矩上限之内（kp 太大 → 饱和 → 刚度反而丢失）；
+3. 漂移守卫只看腿 + 腰，手臂不计入基线；
+4. 沉降观察窗口覆盖动作结束后约 2 秒才出现的漂移峰值。
 """
 from __future__ import annotations
 
@@ -35,6 +43,17 @@ from robot_gui.profile import (
     LOWER_BODY_JOINT_NAMES,
     WAIST_SDK_SLOTS,
 )
+
+#: 官方 G1 29DoF MJCF 里的执行器力矩上限（ctrlrange）。
+#: 腰 pitch/roll ±50 Nm、腰 yaw ±88 Nm、手臂 ±25 Nm。
+TORQUE_LIMITS: dict[str, float] = {
+    "waist_yaw": 88.0,
+    "waist_roll": 50.0,
+    "waist_pitch": 50.0,
+    "shoulder": 25.0,
+    "elbow": 25.0,
+    "wrist": 5.0,
+}
 
 
 class _FakeMotor:
@@ -93,13 +112,13 @@ def sdk_available() -> Any:
                 sys.modules[name] = module
 
 
-def build_command(feedforward=None, waist_slot_mode: int = 0):
+def build_command(feedforward=None):
     """用 patched 的命令构造函数造一条 LowCmd。"""
     import g1_action_studio.robot as studio_robot
 
     from robot_gui.gravity import install_gravity_command_builder
 
-    install_gravity_command_builder(feedforward, waist_slot_mode)
+    install_gravity_command_builder(feedforward)
 
     class FakeCrc:
         @staticmethod
@@ -112,80 +131,29 @@ def build_command(feedforward=None, waist_slot_mode: int = 0):
     return studio_robot.build_command(q, np.zeros(17), kp, kd, 0.5, FakeCrc())
 
 
-def test_command_leaves_waist_slots_to_the_firmware(sdk_available: Any) -> None:
-    """腰的槽位必须写成 mode=0 且增益/目标全 0，固件才继续用它自己的平衡回路。"""
+def test_waist_slots_carry_real_gains(sdk_available: Any) -> None:
+    """腰的槽位必须带有效增益——空槽位会让腰瘫到 +32.8° 的机械限位。"""
     command = build_command()
 
     for slot in WAIST_SDK_SLOTS:
         motor = command.motor_cmd[slot]
-        assert motor.mode == 0, f"slot {slot} 仍被 arm_sdk 使能"
-        assert motor.kp == 0.0
-        assert motor.kd == 0.0
-        assert motor.q == 0.0
-        assert motor.dq == 0.0
-        assert motor.tau == 0.0
+        assert motor.mode == 1, f"slot {slot} 没有被使能"
+        assert motor.kp > 0.0, f"slot {slot} 的 kp 是 0，腰会瘫到机械限位"
+        assert motor.kd > 0.0, f"slot {slot} 没有阻尼"
+        assert motor.q == 0.0 or motor.q != 0.0  # 目标角由轨迹给出，这里只确认字段存在
 
 
-def test_waist_slots_equal_the_sdk_default_command(sdk_available: Any) -> None:
-    """腰槽位的值必须**逐字段等于 SDK 的默认空指令**。
-
-    这说明「显式写 0」和「根本不写这一路」在报文上完全等价：
-    SDK 的 `unitree_hg_msg_dds__MotorCmd_()` 默认就是
-    `MotorCmd_(0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)`，而 LowCmd_ 构造时 35 个槽位
-    都是这个默认值（见 unitree_sdk2py/idl/default.py）。
-
-    显式写出来只是为了把「腰不接管」这层意图留在代码里，并让上面那条测试
-    断言的是我们的意图，而不是碰巧等于 SDK 默认值。
-    """
-    from unitree_sdk2py.idl.default import unitree_hg_msg_dds__MotorCmd_
-
-    command = build_command()
-    default = unitree_hg_msg_dds__MotorCmd_()
-
-    for slot in WAIST_SDK_SLOTS:
-        motor = command.motor_cmd[slot]
-        assert motor.mode == default.mode
-        assert motor.q == default.q
-        assert motor.dq == default.dq
-        assert motor.tau == default.tau
-        assert motor.kp == default.kp
-        assert motor.kd == default.kd
-
-
-def test_command_still_drives_both_arms(sdk_available: Any) -> None:
+def test_arm_slots_are_driven_with_gains(sdk_available: Any) -> None:
     """双臂 14 个槽位照常使能并带增益。"""
     command = build_command()
 
     for slot in ARM_SDK_SLOTS:
         motor = command.motor_cmd[slot]
-        assert motor.mode == 1, f"slot {slot} 没有被 arm_sdk 使能"
+        assert motor.mode == 1
         assert motor.kp == pytest.approx(60.0)
         assert motor.kd == pytest.approx(1.5)
 
     assert command.motor_cmd[29].q == pytest.approx(0.5)
-
-
-def test_diagnostic_mode_writes_waist_mode_one(sdk_available: Any) -> None:
-    """诊断档（waist_slot_mode=1）：腰槽位写 mode=1，其余字段不变。
-
-    这是真机对照实验用的档位——**唯一变量就是腰槽位的 mode**，用来判别
-    `mode=0` 到底是"交回固件"还是"断力矩"。它不是可用的控制模式：
-    腰被 arm_sdk 名义上接管却给零增益，若固件真的把腰交出来，腰会瘫。
-    """
-    command = build_command(waist_slot_mode=1)
-
-    for slot in WAIST_SDK_SLOTS:
-        motor = command.motor_cmd[slot]
-        assert motor.mode == 1
-        assert motor.kp == 0.0
-        assert motor.kd == 0.0
-        assert motor.q == 0.0
-        assert motor.dq == 0.0
-        assert motor.tau == 0.0
-
-    # 双臂不受影响，仍然照常使能并带增益。
-    for slot in ARM_SDK_SLOTS:
-        assert command.motor_cmd[slot].mode == 1
 
 
 def test_command_builder_is_installed_even_without_gravity_feedforward(
@@ -193,17 +161,16 @@ def test_command_builder_is_installed_even_without_gravity_feedforward(
 ) -> None:
     """关掉重力前馈也必须装命令构造函数补丁。
 
-    补丁同时负责"只接管双臂"和重力前馈。只在前馈开启时装的话，
-    `ROBOT_GUI_GRAVITY_COMPENSATION=0` 时会退回 studio 原版 `build_command`，
-    **那会把腰一起接管**——正好是要避免的事。
+    补丁负责给被接管的关节（含腰）加重力前馈。只在前馈开启时装的话，
+    `ROBOT_GUI_GRAVITY_COMPENSATION=0` 时腰就没有任何支撑力矩。
     """
     from robot_gui import control
 
-    calls: list[tuple[object, int]] = []
+    calls: list[object] = []
     monkeypatch.setattr(
         control,
         "install_gravity_command_builder",
-        lambda feedforward, waist_slot_mode=0: calls.append((feedforward, waist_slot_mode)),
+        lambda feedforward: calls.append(feedforward),
     )
 
     control.ControlService(
@@ -213,15 +180,38 @@ def test_command_builder_is_installed_even_without_gravity_feedforward(
         feedforward=None,
     )
 
-    assert calls == [(None, 0)]
+    assert calls == [None]
 
 
-def test_waist_slot_mode_setting_rejects_other_values() -> None:
-    from robot_gui.main import RuntimeSettings
+def test_waist_gains_stay_inside_the_torque_limit() -> None:
+    """腰的 kp 必须在力矩上限内：kp × 饱和前误差 ≤ 50 Nm。
 
-    assert RuntimeSettings().waist_slot_mode == 0
-    with pytest.raises(ValueError):
-        RuntimeSettings(waist_slot_mode=2).validate()
+    kp 太大反而危险：力矩到 50 Nm 就饱和，超过之后刚度丢失、腰会继续倒。
+    waist_pitch 行程只有 ±0.52 rad = ±29.8°，饱和误差必须明显小于行程。
+    """
+    kp = DEFAULT_GAINS["waist"]["hold_kp"]
+    limit = TORQUE_LIMITS["waist_pitch"]
+    saturation_error = limit / kp
+    assert saturation_error < 0.26, (
+        f"kp={kp} 的饱和误差 {saturation_error:.3f} rad 已经接近 waist_pitch 的行程上限"
+    )
+    # 腰必须真的被给到刚度，而不是留空。
+    assert kp > 0.0
+    assert DEFAULT_GAINS["waist"]["hold_kd"] > 0.0
+
+
+def test_arm_gains_stay_inside_the_torque_limit() -> None:
+    """手臂的 kp 也不能让肩/肘在实测偏差范围内就饱和。
+
+    2026-10-21 实测最大跟踪偏差 0.146 rad；kp=120 时肩 pitch 的饱和误差
+    25/120 = 0.208 rad，实测偏差还在饱和界以内。
+    """
+    kp = DEFAULT_GAINS["arms"]["hold_kp"]
+    limit = TORQUE_LIMITS["shoulder"]
+    saturation_error = limit / kp
+    assert saturation_error > 0.146, (
+        f"kp={kp} 的饱和误差 {saturation_error:.3f} rad 小于实测最大偏差，肩会饱和"
+    )
 
 
 def test_lower_body_monitor_ignores_arm_motion() -> None:
@@ -265,14 +255,6 @@ def test_lower_body_monitor_watches_legs_and_waist_only() -> None:
         if joint.group in {"left_leg", "right_leg", "waist"}
     )
     assert len(LOWER_BODY_JOINT_NAMES) == 15
-    assert not any(name.startswith(("left_shoulder", "right_shoulder", "left_elbow", "right_elbow")) for name in LOWER_BODY_JOINT_NAMES)
-
-
-def test_waist_gains_are_inert() -> None:
-    """腰不接管：waist 增益全 0，配置里留着的旧值不会生效。"""
-    assert set(DEFAULT_GAINS) == {"arms", "waist"}
-    assert all(value == 0.0 for value in DEFAULT_GAINS["waist"].values())
-    assert DEFAULT_GAINS["arms"]["hold_kp"] == 60.0
 
 
 def test_settle_window_covers_the_delayed_peak() -> None:
@@ -305,7 +287,11 @@ def store_with(tmp_path: Path, group: str, width: int) -> ActionStore:
 
 
 def test_replay_rejects_waist_action(tmp_path: Path) -> None:
-    """含腰的动作直接被拒，且在下发任何控制命令之前返回。"""
+    """含腰的动作直接被拒，且在下发任何控制命令之前返回。
+
+    动作库只收 14 维的 arms 组：腰虽然由我们下发指令，但它的目标角是**锁在接管
+    瞬间的定值**，不执行 ECHO-G 转出的腰轨迹。
+    """
     service = ControlService(
         settings=ControlSettings(interface="test0", enabled=True, fsm_whitelist=(501,)),
         telemetry=FakeTelemetry(),

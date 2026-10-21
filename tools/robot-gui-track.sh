@@ -152,8 +152,8 @@ if sent:
     print('  我们发的腰槽位 mode  :', sorted(set(sent)))
 print()
 print('  判读：')
-print('    腰 mode 回读 1→0 且腰 14 稳  → mode=0 是交回固件，方案成立')
-print('    腰 mode 回读 1→0 且腰 14 瘫  → mode=0 是断力矩，立刻停机，方案不成立')
-print('    腰 mode 回读 全程 1          → arm_sdk 不影响 per-motor mode，腰由固件管')
-print('    对照跑（ROBOT_GUI_WAIST_SLOT_MODE=1）时腰瘫 → 固件根本不接管腰')
+print('    腰14 前倾 < 5° 且稳      → 腰的支撑力矩够用，方案成立')
+print('    腰14 前倾 5~15°          → 支撑力矩不够，按 50 Nm 力矩上限往上调 kp')
+print('    腰14 顶到 +30° 附近      → 力矩饱和或增益没生效，查腰的 kp/kd 与 tau')
+print('    腰 mode 回读全程 1        → 正常，per-motor mode 不影响腰的行为')
 "

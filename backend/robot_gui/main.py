@@ -61,10 +61,8 @@ class RuntimeSettings:
     #: 沉降观察窗口。躯干前倾是延迟发展的，峰值出现在动作结束后约 2 秒，
     #: 1.5 秒的窗口会漏掉峰值，所以默认 3 秒。
     hold_soak_s: float = 3.0
-    #: 腰槽位的 motor_cmd.mode。0=不接管腰；1=诊断档（arm_sdk 名义上接管腰但
-    #: 增益为 0），用来在真机上判别 mode 语义，有让腰瘫掉的风险。
-    waist_slot_mode: int = 0
-    #: 允许切换的 FSM 运动模式，形如 "ai=ai,stand=stand"。留空表示切换能力关闭。
+    #: 允许切换的 FSM 运动模式，形如 "0,1,4,501"。留空表示**全部模式都允许**——
+    #: 切换本身有操作员二次确认，门槛交给人和遥控器，不靠配置项。
     fsm_modes: str = ""
 
     @classmethod
@@ -106,7 +104,6 @@ class RuntimeSettings:
             in {"1", "true", "yes", "on"},
             lower_body_drift_deg=float(os.getenv("ROBOT_GUI_LOWER_BODY_DRIFT_DEG", "5")),
             hold_soak_s=float(os.getenv("ROBOT_GUI_HOLD_SOAK_S", "3.0")),
-            waist_slot_mode=int(os.getenv("ROBOT_GUI_WAIST_SLOT_MODE", "0")),
             fsm_modes=os.getenv("ROBOT_GUI_FSM_MODES", "").strip(),
         )
 
@@ -137,10 +134,6 @@ class RuntimeSettings:
                 raise ValueError("ROBOT_GUI_TRANSITION_SECONDS must be positive.")
             if not 0 < self.replay_speed <= 2.0:
                 raise ValueError("ROBOT_GUI_REPLAY_SPEED must be in (0, 2].")
-            if self.waist_slot_mode not in (0, 1):
-                raise ValueError(
-                    "ROBOT_GUI_WAIST_SLOT_MODE must be 0 (不接管腰) or 1 (诊断档)."
-                )
 
 
 def _error(code: str, message: str, status: int = 409) -> HTTPException:
@@ -187,7 +180,6 @@ def create_app(
             replay_speed=runtime_settings.replay_speed,
             lower_body_drift_deg=runtime_settings.lower_body_drift_deg,
             hold_soak_s=runtime_settings.hold_soak_s,
-            waist_slot_mode=runtime_settings.waist_slot_mode,
             gains=load_gains(runtime_settings.gains_path),
         ),
         telemetry=hub,

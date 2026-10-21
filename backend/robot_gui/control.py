@@ -6,9 +6,12 @@
   - plan_sequence 负责「从当前实测姿态 → 动作首帧 → 动作 → 返回基线」的连续轨迹，
                   并在发送任何控制命令之前对整条样条做关节限位与自碰撞判定
 
-**接管范围只有双臂（14 关节）。** 腰（slot 12-14）和腿（slot 0-11）都不下发，
-由机器人内置运控负责：arm_sdk 一旦接管腰，内置的腰部平衡回路就退让，躯干会前倾
-（2026-10-20 真机实测：腰 14 从 -1.49° 前倾到 +10.01°，动作结束后仍在恶化）。
+**接管范围：双臂 14 关节 + 腰 3 关节的姿态保持。** 动作本身是 14 维（arms 组），
+腰的目标角恒等于接管瞬间的姿态（锁在定值），腿（slot 0-11）由内置运控负责。
+
+腰的槽位必须由我们下发：2026-10-21 真机实测，arm_sdk 的权重一旦升到 1，腰的控制权
+就无条件归我们（per-motor mode 写 0 或 1 没有区别，两档前倾峰值 34.01° vs 34.15%）。
+腰槽位留空时腰在接管后 0.8 秒内被推到 +32.8° 的机械限位，固件的腰部平衡回路退让。
 
 顺序是刻意的：先在只读状态下规划并校验，规划失败就一个控制命令都不发；
 规划通过后才 acquire()（创建 rt/arm_sdk 发布器）并播放。
@@ -39,19 +42,33 @@ from .profile import LOWER_BODY_JOINT_NAMES
 
 logger = logging.getLogger(__name__)
 
-#: 本工作台只接管双臂（14 关节）。腰与腿都不下发，由机器人内置运控负责。
+#: 本工作台的接管范围：双臂 14 关节 + 腰 3 关节。
+#:
+#: 腰虽然不由动作驱动（动作库是 arms 组 14 维，腰的目标角恒等于接管瞬间的姿态），
+#: 但**必须由我们下发指令**：`rt/arm_sdk` 的权重一旦升到 1，腰的控制权就无条件归我们，
+#: `motor_cmd[i].mode` 写 0 或 1 都没有区别（2026-10-21 实测两档前倾峰值 34.01° vs
+#: 34.15°，曲线形状一致）。腰槽位留空（增益全 0）时，腰在接管后 0.8 秒内被推到
+#: +32.8° 的机械限位，固件的腰部平衡回路退让，躯干前倾 +40°。
 ARM_JOINT_COUNT = 14
 
-#: 与 g1-action-studio 的示例增益一致：保持阶段 kp/kd = 60/1.5。
+#: 增益取值。
+#:
+#: 腰的 kp 决定"躯干前倾多少度才被拉住"：waist_pitch 的力矩上限是 ±50 Nm
+#: （官方 G1 29DoF MJCF 的 ctrlrange），行程 ±0.52 rad = ±29.8°。
+#: kp=120 时实测前倾 +10.01°，kp=0 时瘫到 +32.8° 限位；kp=300 对应饱和误差
+#: 50/300 = 0.167 rad = 9.5°，前倾会停在饱和界以内。kd 取 5，与官方
+#: unitree_mujoco 的 G1 FixStand 腰增益（200/5）同量级。
+#:
+#: 手臂的 kp 决定"够不够得到目标"：肩 pitch 力矩上限 ±25 Nm，kp=120 时饱和误差
+#: 25/120 = 0.208 rad = 11.9°，实测最大跟踪偏差 0.146 rad = 8.4° 还没到饱和。
+#: kd 按 √kp 比例微调，保持阻尼比不变。
 DEFAULT_GAINS: dict[str, dict[str, float]] = {
-    "arms": {"hold_kp": 60.0, "hold_kd": 1.5, "teach_kp": 20.0, "teach_kd": 1.5},
-    # 腰不接管。waist 组只是为了满足 studio 的增益结构（它按 arms/waist 两组拼 17 维），
-    # 腰的槽位根本不会下发，这里的值不产生任何作用。
-    "waist": {"hold_kp": 0.0, "hold_kd": 0.0, "teach_kp": 0.0, "teach_kd": 0.0},
+    "arms": {"hold_kp": 120.0, "hold_kd": 3.5, "teach_kp": 20.0, "teach_kd": 1.5},
+    "waist": {"hold_kp": 300.0, "hold_kd": 5.0, "teach_kp": 20.0, "teach_kd": 1.5},
 }
 
 #: 官方接口下 12-28 槽位为腰部和上肢电机参数，29.q 为 0-1 权重；
-#: 腿部 0-11 由内置运控负责，本工作台不接管；腰部 12-14 同样不接管。
+#: 腿部 0-11 由内置运控负责，本工作台不接管。
 UPPER_JOINT_COUNT = 17
 
 
@@ -81,9 +98,6 @@ class ControlSettings:
     #: 动作结束后的沉降观察窗口。前倾是延迟发展的：实测峰值出现在动作结束后约 2 秒
     #: （轨迹 8.9 秒，腰 14 峰值 t=10.86s），1.5 秒的窗口会漏掉峰值。
     hold_soak_s: float = 3.0
-    #: 腰槽位写入的 motor_cmd.mode。0=不接管腰（默认）；1=诊断档，arm_sdk 名义上
-    #: 接管腰但增益仍为 0，用来在真机上判别 mode 语义。1 有让腰瘫掉的风险。
-    waist_slot_mode: int = 0
     gains: dict[str, dict[str, float]] | None = None
 
     def validate(self) -> None:
@@ -244,9 +258,9 @@ class ControlService:
         self._trajectory_duration = 0.0
         self._tracking: dict[str, Any] = {}
         self._lower_body: dict[str, Any] = {}
-        # 必须无条件安装：补丁同时负责"只接管双臂"和重力前馈。
-        # 关掉重力前馈时不装它，就会退回 studio 原版 build_command 把腰一起接管。
-        install_gravity_command_builder(feedforward, self._settings.waist_slot_mode)
+        # 必须无条件安装：补丁负责给所有被接管的关节（含腰）加重力前馈。
+        # 不装它就会退回 studio 原版 build_command，腰没有前馈、撑不住躯干。
+        install_gravity_command_builder(feedforward)
 
     # ---- 状态 ----
 
@@ -352,8 +366,8 @@ class ControlService:
         if action.group != "arms":
             raise ControlError(
                 "action_group_unsupported",
-                f"动作组 {action.group} 不被接管：本工作台只接管双臂（arms 组 14 维），"
-                "腰与腿由机器人内置运控负责。",
+                f"动作组 {action.group} 不被接管：本工作台只回放 arms 组（14 维动作），"
+                "腰的三维锁在接管瞬间的姿态、不执行动作里的腰轨迹，腿由内置运控负责。",
             )
         return action
 
@@ -412,9 +426,9 @@ class ControlService:
         audio_thread: threading.Thread | None = None
         try:
             self._set_phase(ControlPhase.PLANNING, "等待机器人反馈")
+            # arms 组是 14 维动作，腰的三维在轨迹里恒等于接管瞬间的姿态；
+            # 但腰的槽位仍要由我们下 PD + 重力前馈，否则躯干会前倾。
             gains = dict(self._settings.gains or DEFAULT_GAINS)
-            # 腰不接管：即使配置里还留着 waist 组也一律作废，免得以后误以为腰受控。
-            gains["waist"] = dict(DEFAULT_GAINS["waist"])
             with RobotSession(
                 self._settings.interface,
                 gains,
@@ -548,10 +562,10 @@ def measured_pose_provider(hub: Any):
 
 
 def load_gains(path: Path | None) -> dict[str, dict[str, float]] | None:
-    """从 JSON 读增益配置；缺省时用内置的 hold 60/1.5。
+    """从 JSON 读增益配置；缺省时用内置值（arms 120/3.5、waist 300/5）。
 
-    只接管双臂，所以只要求 arms 一组。waist 组是接管范围收窄之前的遗留，
-    填了也不生效（腰的槽位不会下发），留着只是为了兼容旧的配置文件。
+    需要 arms 与 waist 两组：腰虽然不由动作驱动，但它的槽位由我们下发，
+    必须有刚度（kp）才撑得住躯干。teach 组是手掰示教用的，目前未开放。
     """
     if path is None:
         return None

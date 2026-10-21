@@ -114,24 +114,31 @@ def test_settings_ignore_unknown_and_non_numeric_ids() -> None:
     assert settings.permits(0) is False
 
 
-def test_settings_without_modes_disable_switching() -> None:
-    assert FsmSettings.from_env("").enabled is False
-    assert FsmSettings.from_env(None).enabled is False
+def test_settings_without_modes_allow_every_catalogued_mode() -> None:
+    """未配置 ROBOT_GUI_FSM_MODES = 目录里的模式全部允许。
+
+    切换本身有操作员二次确认（前端 window.confirm），门槛交给人和遥控器，
+    不靠配置项。需要收窄时才设 ROBOT_GUI_FSM_MODES。
+    """
+    for settings in (FsmSettings.from_env(""), FsmSettings.from_env(None)):
+        assert settings.enabled is True
+        assert all(settings.permits(fsm_id) for fsm_id in (0, 1, 4, 501))
 
 
 # ---- 服务门控 ----
 
 
-def test_state_reports_reason_when_switching_is_disabled() -> None:
+def test_state_allows_switching_when_no_allowlist_is_configured() -> None:
+    """没配 ROBOT_GUI_FSM_MODES 时，目录里的模式全部可点。"""
     service, _ = build_service(modes="")
 
     state = service.state()
 
-    assert state["available"] is False
-    assert "ROBOT_GUI_FSM_MODES" in state["reason"]
+    assert state["available"] is True
+    assert state["reason"] == ""
     assert state["whitelist"] == [501]
     assert {mode["fsm_id"] for mode in state["modes"]} == {0, 1, 4, 501}
-    assert all(mode["allowed"] is False for mode in state["modes"])
+    assert all(mode["allowed"] is True for mode in state["modes"])
 
 
 def test_state_reports_reason_when_controls_are_off() -> None:
@@ -264,7 +271,9 @@ def test_http_fsm_state_and_mode_endpoints(tmp_path) -> None:
     assert adapter.switched == [501]
 
 
-def test_http_fsm_state_is_closed_without_configured_modes(tmp_path) -> None:
+def test_http_fsm_switching_is_open_without_configured_modes(tmp_path) -> None:
+    """没配 ROBOT_GUI_FSM_MODES 时，HTTP 层的模式切换直接可用。"""
+    adapter = FakeAdapter()
     app = create_app(
         RuntimeSettings(
             mode="real",
@@ -272,18 +281,20 @@ def test_http_fsm_state_is_closed_without_configured_modes(tmp_path) -> None:
             data_dir=tmp_path,
             controls_enabled=True,
         ),
-        telemetry_adapter=FakeAdapter(),
+        telemetry_adapter=adapter,
     )
 
     with TestClient(app) as client:
         state = client.get("/api/v1/fsm/state").json()
-        blocked = client.post(
+        accepted = client.post(
             "/api/v1/fsm/mode", json={"fsm_id": 501, "confirmed": True}
         )
 
-    assert state["available"] is False
-    assert blocked.status_code == 409
-    assert blocked.json()["detail"]["code"] == "capability_disabled"
+    assert state["available"] is True
+    assert state["reason"] == ""
+    assert all(mode["allowed"] is True for mode in state["modes"])
+    assert accepted.status_code == 200
+    assert adapter.switched == [501]
 
 
 def test_snapshot_publishes_the_fsm_id(tmp_path) -> None:
