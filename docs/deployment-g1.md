@@ -119,7 +119,11 @@ npm run dev -- --host 0.0.0.0 --port 5173
 
 不设 `ROBOT_GUI_BACKEND` 时代理仍指向本机 8000（机器人本机部署的行为不变）。
 
-机器人上的封装脚本 `~/robot-gui.sh`：
+机器人侧的启停脚本在仓库的 `tools/robot-gui.sh`，家目录只留一个软链：
+
+```bash
+ln -sf /usr/local/src/robot-gui/tools/robot-gui.sh ~/robot-gui.sh
+```
 
 ```bash
 bash ~/robot-gui.sh start            # 只读
@@ -141,6 +145,7 @@ python3 tools/check_waist_locked.py eth0 --seconds 60   # 物理锁腰判别（�
 
 | 脚本 | 用途 |
 |---|---|
+| `tools/robot-gui.sh` | 启停后端与前端（`~/robot-gui.sh` 是它的软链） |
 | `tools/robot-gui-track.sh` | 回放一次动作，打印跟踪误差、下盘漂移、腰 14 全程曲线 |
 | `tools/pose_sampler.py` | 全程姿态采样器（由 track.sh 调用） |
 | `tools/inspect_fsm.py` | 读 `fsm_id` 与 `fsm_mode`（静态/运动） |
