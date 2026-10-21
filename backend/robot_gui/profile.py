@@ -32,8 +32,12 @@ G1_29DOF_JOINTS = (
     JointDescriptor("left_wrist_roll", "left_wrist_roll_joint", 19, "left_arm"),
     JointDescriptor("left_wrist_pitch", "left_wrist_pitch_joint", 20, "left_arm"),
     JointDescriptor("left_wrist_yaw", "left_wrist_yaw_joint", 21, "left_arm"),
-    JointDescriptor("right_shoulder_pitch", "right_shoulder_pitch_joint", 22, "right_arm"),
-    JointDescriptor("right_shoulder_roll", "right_shoulder_roll_joint", 23, "right_arm"),
+    JointDescriptor(
+        "right_shoulder_pitch", "right_shoulder_pitch_joint", 22, "right_arm"
+    ),
+    JointDescriptor(
+        "right_shoulder_roll", "right_shoulder_roll_joint", 23, "right_arm"
+    ),
     JointDescriptor("right_shoulder_yaw", "right_shoulder_yaw_joint", 24, "right_arm"),
     JointDescriptor("right_elbow", "right_elbow_joint", 25, "right_arm"),
     JointDescriptor("right_wrist_roll", "right_wrist_roll_joint", 26, "right_arm"),

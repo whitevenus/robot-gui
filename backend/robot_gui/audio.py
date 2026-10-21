@@ -21,6 +21,7 @@ PCM 必须是 16 kHz / 单声道 / 16 bit。
    残留的旧流不会和新流撞上。
 3. **stream_id 必须全局唯一。** 用时间戳，不用进程内自增计数。
 """
+
 from __future__ import annotations
 
 import threading
@@ -88,7 +89,9 @@ def validate_pcm(pcm: bytes) -> None:
     if not pcm:
         raise AudioError("audio.empty", "音频数据为空。")
     if len(pcm) % 2:
-        raise AudioError("audio.invalid_pcm_length", "PCM 长度必须是偶数（16 位采样）。")
+        raise AudioError(
+            "audio.invalid_pcm_length", "PCM 长度必须是偶数（16 位采样）。"
+        )
 
 
 class G1AudioPort:
@@ -158,7 +161,7 @@ class G1AudioPort:
                 self._abort_stream()
                 return "audio.cancelled"
             return self._finish_stream()
-        except Exception:
+        except Exception:  # noqa: BLE001 - SDK 推流异常统一收敛成错误码
             self._abort_stream()
             return "audio.sdk_exception"
 
@@ -174,7 +177,7 @@ class G1AudioPort:
                 return ""
             try:
                 self._client.PlayStop(self._app_name)
-            except Exception:
+            except Exception:  # noqa: BLE001 - 停止失败要收敛成错误码，不能往上抛
                 self._recovery_unconfirmed = True
                 return "audio.stop_exception"
             # 该 SDK 实现不校验 RPC 返回码就返回 0，因此无法确认流已安全停止。
@@ -191,7 +194,7 @@ class G1AudioPort:
                 return
             try:
                 self._client.PlayStop(self._app_name)
-            except Exception:
+            except Exception:  # noqa: BLE001 - 收尾路径不再抛错，只保证不残留流
                 pass
             self._active_stream_id = ""
 
@@ -199,7 +202,7 @@ class G1AudioPort:
         with self._lock:
             try:
                 result = self._client.PlayStop(self._app_name)
-            except Exception:
+            except Exception:  # noqa: BLE001 - 停止失败要收敛成错误码，不能往上抛
                 return "audio.stop_exception"
             if result != 0:
                 return "audio.stop_rejected"

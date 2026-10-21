@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
-import logging
 import threading
-from typing import Any, Callable, Protocol
+from collections.abc import Callable
+from typing import Any, Protocol
+
+from loguru import logger
 
 from .profile import G1_29DOF_JOINTS
 
@@ -73,9 +75,7 @@ class UnitreeSdkTelemetryAdapter:
             ChannelSubscriber(self._topics["low_state"], LowState_),
             self._on_low_state,
         )
-        self._subscribe(
-            ChannelSubscriber(self._topics["bms"], BmsState_), self._on_bms
-        )
+        self._subscribe(ChannelSubscriber(self._topics["bms"], BmsState_), self._on_bms)
         self._subscribe(
             ChannelSubscriber(self._topics["torso_imu"], IMUState_),
             self._on_secondary_imu,
@@ -105,8 +105,8 @@ class UnitreeSdkTelemetryAdapter:
         for subscriber in reversed(self._subscribers):
             try:
                 subscriber.Close()
-            except Exception as error:
-                logging.exception("Failed to close a Unitree telemetry subscriber.")
+            except Exception as error:  # noqa: BLE001 - 清理失败要收集起来统一抛
+                logger.exception("Failed to close a Unitree telemetry subscriber.")
                 close_errors.append(error)
         self._subscribers.clear()
         if close_errors:
@@ -180,8 +180,8 @@ class UnitreeSdkTelemetryAdapter:
                     self._report_error("fsm", f"GetFsmId returned {result}.")
                 else:
                     self._publish("fsm", {"id": int(fsm_id), "mode": None})
-            except Exception as error:
-                logging.exception("Failed to poll the G1 FSM state.")
+            except Exception as error:  # noqa: BLE001 - 轮询失败要上报给前端
+                logger.exception("Failed to poll the G1 FSM state.")
                 self._report_error("fsm", str(error))
             self._stop.wait(0.2)
 
@@ -194,7 +194,7 @@ class UnitreeSdkTelemetryAdapter:
             result, value = self._loco_client.GetFsmId()
             if result == 0 and value is not None:
                 fsm_id = int(value)
-        except Exception:
+        except Exception:  # noqa: BLE001 - 回读失败降级成"未知"，不能打断调用方
             logger.exception("回读 FSM ID 失败。")
         return {"id": fsm_id, "mode": self._read_fsm_mode()}
 
@@ -209,14 +209,14 @@ class UnitreeSdkTelemetryAdapter:
                 ROBOT_API_ID_LOCO_GET_FSM_MODE,
             )
 
-            result, data = self._loco_client._Call(
+            result, data = self._loco_client._Call(  # noqa: SLF001 - SDK 没有 GetFsmMode，只能走底层 _Call
                 ROBOT_API_ID_LOCO_GET_FSM_MODE, "{}"
             )
             if result != 0 or not data:
                 return None
             return int(json.loads(data).get("data"))
-        except Exception:
-            logger.debug("回读 fsm_mode 失败。", exc_info=True)
+        except Exception:  # noqa: BLE001 - 回读失败降级成"未知模式"，不能打断切换流程
+            logger.opt(exception=True).debug("回读 fsm_mode 失败。")
             return None
 
     def switch_mode(self, fsm_id: int) -> tuple[int, str]:
@@ -228,8 +228,8 @@ class UnitreeSdkTelemetryAdapter:
         """
         try:
             code = self._loco_client.SetFsmId(int(fsm_id))
-        except Exception as error:
-            logger.exception("切换 FSM 模式失败：%s", fsm_id)
+        except Exception as error:  # noqa: BLE001 - 切换失败要收敛成错误码返回
+            logger.exception("切换 FSM 模式失败：{}", fsm_id)
             return -1, str(error)
         return int(code), ""
 

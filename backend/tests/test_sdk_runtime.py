@@ -3,15 +3,13 @@
 真实缺陷：SDK 的 setup.py 不把 utils/lib/*.so 打进 wheel，安装后缺失，
 只有下发 LowCmd 的路径会失败（只读遥测不经过 CRC），错误信息却指向共享库本身。
 """
+
 from __future__ import annotations
 
-import platform
 from pathlib import Path
 
-import pytest
-
 from robot_gui import sdk_runtime
-from robot_gui.sdk_runtime import ensure_crc_libraries, describe_crc_status
+from robot_gui.sdk_runtime import describe_crc_status, ensure_crc_libraries
 
 
 def test_crc_library_is_copied_when_missing(monkeypatch, tmp_path: Path) -> None:

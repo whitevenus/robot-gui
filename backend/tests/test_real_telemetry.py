@@ -112,7 +112,9 @@ def test_real_status_has_29dof_telemetry_and_controls_disabled() -> None:
     assert snapshot["capabilities"]["controls"]["available"] is False
 
 
-def test_telemetry_test_adapter_is_injected_only_and_control_stays_closed(tmp_path) -> None:
+def test_telemetry_test_adapter_is_injected_only_and_control_stays_closed(
+    tmp_path,
+) -> None:
     adapter = TelemetryTestAdapter()
     app = create_app(
         RuntimeSettings(mode="real", dds_interface="test0", data_dir=tmp_path),
@@ -291,7 +293,9 @@ def test_runtime_rejects_mock_mode_missing_interface_and_bad_ranges(tmp_path) ->
         "ROBOT_GUI_FSM_WHITELIST must list at least one FSM id",
     )
 
-    for settings, expected_message in zip(invalid_settings, expected_messages):
+    for settings, expected_message in zip(
+        invalid_settings, expected_messages, strict=True
+    ):
         with pytest.raises(ValueError, match=expected_message):
             with TestClient(
                 create_app(settings, telemetry_adapter=TelemetryTestAdapter())

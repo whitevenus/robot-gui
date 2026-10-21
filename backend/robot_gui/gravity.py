@@ -25,10 +25,12 @@
 腰的控制权就无条件归我们，per-motor mode 写 0 或 1 都没有区别（2026-10-21 实测）。
 腰的角度仍然参与重力模型，因为手臂的重力力矩依赖躯干姿态。
 """
+
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Protocol
 
 import numpy as np
 
@@ -101,7 +103,9 @@ class GravityFeedforward:
             if measured is not None:
                 leg_measured, upper_measured = measured
                 leg = np.asarray(leg_measured, dtype=float).reshape(self._leg_count)
-                upper = np.asarray(upper_measured, dtype=float).reshape(self._upper_count)
+                upper = np.asarray(upper_measured, dtype=float).reshape(
+                    self._upper_count
+                )
 
         data = self._data
         data.qpos[:] = self._model.qpos0

@@ -17,6 +17,7 @@
 3. 漂移守卫只看腿 + 腰，手臂不计入基线；
 4. 沉降观察窗口覆盖动作结束后约 2 秒才出现的漂移峰值。
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -31,10 +32,10 @@ import pytest
 
 from robot_gui.actions import ActionStore
 from robot_gui.control import (
+    DEFAULT_GAINS,
     ControlError,
     ControlService,
     ControlSettings,
-    DEFAULT_GAINS,
     LowerBodyMonitor,
 )
 from robot_gui.profile import (
@@ -262,7 +263,12 @@ def test_settle_window_covers_the_delayed_peak() -> None:
     from robot_gui.main import RuntimeSettings
 
     assert RuntimeSettings().hold_soak_s >= 3.0
-    assert ControlSettings(interface="test0", enabled=True, fsm_whitelist=(501,)).hold_soak_s >= 3.0
+    assert (
+        ControlSettings(
+            interface="test0", enabled=True, fsm_whitelist=(501,)
+        ).hold_soak_s
+        >= 3.0
+    )
 
 
 class FakeTelemetry:
@@ -278,8 +284,7 @@ def store_with(tmp_path: Path, group: str, width: int) -> ActionStore:
     body = {
         "group": group,
         "frames": [
-            {"t": round(index * 0.04, 4), "q": [0.0] * width}
-            for index in range(4)
+            {"t": round(index * 0.04, 4), "q": [0.0] * width} for index in range(4)
         ],
     }
     store.import_action("demo", json.dumps(body).encode("utf-8"))

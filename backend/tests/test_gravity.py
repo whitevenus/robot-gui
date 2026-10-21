@@ -3,9 +3,8 @@
 最重要的一条是「施加前馈后上肢关节必须静止」：它同时验证了符号约定和数值，
 比对着物理直觉推理可靠得多。
 """
-from __future__ import annotations
 
-from pathlib import Path
+from __future__ import annotations
 
 import numpy as np
 import pytest
@@ -47,8 +46,20 @@ def upper_joints_accel(
 
 
 LEG = np.array(
-    [-0.348, -0.007, 0.005, 0.623, 0.029, -0.012,
-     -0.350, -0.019, -0.011, 0.635, 0.033, -0.010]
+    [
+        -0.348,
+        -0.007,
+        0.005,
+        0.623,
+        0.029,
+        -0.012,
+        -0.350,
+        -0.019,
+        -0.011,
+        0.635,
+        0.033,
+        -0.010,
+    ]
 )
 
 
@@ -100,7 +111,9 @@ def test_feedforward_uses_measured_pose_when_available() -> None:
     assert np.isfinite(tau).all()
 
 
-def test_patched_build_command_carries_feedforward(feedforward: GravityFeedforward) -> None:
+def test_patched_build_command_carries_feedforward(
+    feedforward: GravityFeedforward,
+) -> None:
     # Unitree SDK2 只装在机器人上；开发机没有 SDK 时跳过这条。
     pytest.importorskip("unitree_sdk2py")
     import g1_action_studio.robot as studio_robot

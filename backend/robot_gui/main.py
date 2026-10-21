@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +11,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from loguru import logger
 
 from .actions import ActionStore, ActionStoreError
 from .adapters import TelemetryAdapter, UnitreeSdkTelemetryAdapter
@@ -27,15 +28,26 @@ from .gravity import GravityFeedforward, default_model_path
 from .sdk_runtime import describe_crc_status, ensure_crc_libraries
 from .telemetry import TelemetryHub
 
-logger = logging.getLogger(__name__)
+
+def _configure_logging() -> None:
+    """换掉 loguru 的默认 handler：输出到 stderr，带模块名，级别可用环境变量调。"""
+    logger.remove()
+    logger.add(
+        sys.stderr,
+        level=os.getenv("ROBOT_GUI_LOG_LEVEL", "INFO").upper(),
+        format="{time:HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
+    )
+
+
+_configure_logging()
 
 # Unitree SDK2 的 CRC 动态库不会被 wheel 带上，缺了它只有下发命令的路径会失败。
 # 在任何 SDK 导入之前补齐，缺失时记一条明确的日志而不是等到接管动作中途才炸。
 _crc_ready, _crc_detail = ensure_crc_libraries()
 if not _crc_ready:
-    logger.warning("Unitree SDK2 CRC 运行时未就绪：%s", _crc_detail)
+    logger.warning("Unitree SDK2 CRC 运行时未就绪：{}", _crc_detail)
 else:
-    logger.info("%s", describe_crc_status())
+    logger.info("{}", describe_crc_status())
 
 AUDIO_DIR_NAME = "audio"
 
@@ -75,15 +87,13 @@ class RuntimeSettings:
         gains = os.getenv("ROBOT_GUI_GAINS") or None
         return cls(
             mode=os.getenv("ROBOT_GUI_MODE", "real").strip().lower(),
-            controls_enabled=os.getenv(
-                "ROBOT_GUI_CONTROLS_ENABLED", "false"
-            ).strip().lower()
+            controls_enabled=os.getenv("ROBOT_GUI_CONTROLS_ENABLED", "false")
+            .strip()
+            .lower()
             in {"1", "true", "yes", "on"},
             telemetry_push_hz=float(os.getenv("ROBOT_GUI_TELEMETRY_HZ", "10")),
             dds_interface=os.getenv("ROBOT_GUI_DDS_INTERFACE") or None,
-            low_state_topic=os.getenv(
-                "ROBOT_GUI_G1_LOWSTATE_TOPIC", "rt/lowstate"
-            ),
+            low_state_topic=os.getenv("ROBOT_GUI_G1_LOWSTATE_TOPIC", "rt/lowstate"),
             bms_topic=os.getenv("ROBOT_GUI_G1_BMS_TOPIC", "rt/lf/bmsstate"),
             secondary_imu_topic=os.getenv(
                 "ROBOT_GUI_G1_SECONDARY_IMU_TOPIC", "rt/lf/secondary_imu"
@@ -94,15 +104,15 @@ class RuntimeSettings:
             transition_seconds=float(os.getenv("ROBOT_GUI_TRANSITION_SECONDS", "2.0")),
             replay_speed=float(os.getenv("ROBOT_GUI_REPLAY_SPEED", "1.0")),
             audio_app_name=os.getenv("ROBOT_GUI_AUDIO_APP", "robot-gui"),
-            audio_enabled=os.getenv(
-                "ROBOT_GUI_AUDIO_ENABLED", "false"
-            ).strip().lower()
+            audio_enabled=os.getenv("ROBOT_GUI_AUDIO_ENABLED", "false").strip().lower()
             in {"1", "true", "yes", "on"},
-            gravity_compensation=os.getenv(
-                "ROBOT_GUI_GRAVITY_COMPENSATION", "true"
-            ).strip().lower()
+            gravity_compensation=os.getenv("ROBOT_GUI_GRAVITY_COMPENSATION", "true")
+            .strip()
+            .lower()
             in {"1", "true", "yes", "on"},
-            lower_body_drift_deg=float(os.getenv("ROBOT_GUI_LOWER_BODY_DRIFT_DEG", "5")),
+            lower_body_drift_deg=float(
+                os.getenv("ROBOT_GUI_LOWER_BODY_DRIFT_DEG", "5")
+            ),
             hold_soak_s=float(os.getenv("ROBOT_GUI_HOLD_SOAK_S", "3.0")),
             fsm_modes=os.getenv("ROBOT_GUI_FSM_MODES", "").strip(),
         )
@@ -111,9 +121,7 @@ class RuntimeSettings:
         if self.mode != "real":
             raise ValueError("This application requires ROBOT_GUI_MODE=real.")
         if not 1 <= self.telemetry_push_hz <= 20:
-            raise ValueError(
-                "ROBOT_GUI_TELEMETRY_HZ must be between 1 and 20."
-            )
+            raise ValueError("ROBOT_GUI_TELEMETRY_HZ must be between 1 and 20.")
         if self.mode == "real" and not self.dds_interface:
             raise ValueError(
                 "ROBOT_GUI_DDS_INTERFACE is required when ROBOT_GUI_MODE=real."
@@ -213,11 +221,11 @@ def create_app(
         runtime_settings.validate()
         try:
             await asyncio.to_thread(adapter.start, hub.ingest, hub.mark_error)
-        except Exception:
+        except Exception:  # noqa: BLE001 - 启动失败必须记录后原样抛出
             logger.exception("Required Unitree SDK2/DDS telemetry failed to start.")
             try:
                 await asyncio.to_thread(adapter.stop)
-            except Exception:
+            except Exception:  # noqa: BLE001 - 清理失败不能盖掉原始异常
                 logger.exception("Failed to clean up the Unitree telemetry adapter.")
             raise
         try:
@@ -228,7 +236,7 @@ def create_app(
                 audio_source.close()
             try:
                 await asyncio.to_thread(adapter.stop)
-            except Exception:
+            except Exception:  # noqa: BLE001 - 收尾失败只记日志，不阻断退出
                 logger.exception("Failed to stop the telemetry adapter cleanly.")
 
     app = FastAPI(title="Robot GUI API", version="0.2.0", lifespan=lifespan)
@@ -262,9 +270,7 @@ def create_app(
         try:
             while True:
                 await websocket.send_json(snapshot())
-                await asyncio.sleep(
-                    1.0 / runtime_settings.telemetry_push_hz
-                )
+                await asyncio.sleep(1.0 / runtime_settings.telemetry_push_hz)
         except WebSocketDisconnect:
             return
 
@@ -287,7 +293,9 @@ def create_app(
         if not isinstance(action, dict):
             raise _error("action_body_required", "缺少动作内容 action。", status=400)
         try:
-            body = json.dumps(action, ensure_ascii=False, allow_nan=False).encode("utf-8")
+            body = json.dumps(action, ensure_ascii=False, allow_nan=False).encode(
+                "utf-8"
+            )
             summary = store.import_action(name, body)
         except ActionStoreError as error:
             raise _error(error.code, str(error)) from error
@@ -387,7 +395,9 @@ def _read_audio(store: ActionStore, name: str, required: bool = False) -> bytes 
     directory = store.data_dir
     if directory is None:
         if required:
-            raise _error("action_store_not_configured", "未配置 ROBOT_GUI_DATA_DIR。", status=503)
+            raise _error(
+                "action_store_not_configured", "未配置 ROBOT_GUI_DATA_DIR。", status=503
+            )
         return None
     path = directory / AUDIO_DIR_NAME / f"{name}.pcm"
     if not path.is_file():

@@ -9,6 +9,7 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn[standard]>=0.30,<1",
+  "loguru>=0.7",
   # 上肢动作的规划、避碰与真机会话直接复用 g1-action-studio 的模块（不是它的 CLI）。
   # 参考实现放在 references/ 下随仓库分发，这里以显式 path 依赖声明，避免隐式依赖。
   # planning extra 提供 MuJoCo（几何检测）与 OMPL（衔接段绕行，Linux）。
@@ -23,6 +24,9 @@ test = [
   "httpx>=0.27,<1",
   "pytest>=8,<9",
 ]
+dev = [
+  "ruff>=0.6",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -30,3 +34,29 @@ pythonpath = ["."]
 
 [tool.setuptools.packages.find]
 include = ["robot_gui*"]
+
+[tool.ruff]
+target-version = "py311"
+# 与现有代码的排版一致（black 默认 88），ruff format 才不会大面积重排。
+line-length = 88
+src = ["."]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "N", "SLF", "BLE"]
+# 中文注释和文档字符串没法自动折行，E501 只会刷噪声；line-length 仍然管格式化器。
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试要直接读写内部状态才能覆盖真机路径。
+"tests/**" = ["SLF001"]
+
+[tool.ruff.lint.pep8-naming]
+# 这些名字刻意对齐 Unitree SDK 的接口拼写，不是笔误。
+ignore-names = ["PlayStream", "PlayStop", "Init", "Close", "Crc"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["robot_gui", "test_real_telemetry"]
+
+[tool.ruff.format]
+quote-style = "double"
+line-ending = "lf"

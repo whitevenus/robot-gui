@@ -3,24 +3,22 @@
 真机路径不接硬件：所有拒绝分支都在下发任何控制命令之前返回，
 因此可以完整覆盖。成功路径用替身替换 RobotSession 与 AudioClient。
 """
+
 from __future__ import annotations
 
 import json
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 from robot_gui.actions import ActionStore, ActionStoreError
-from robot_gui.adapters import TelemetryCallback, TelemetryErrorCallback
 from robot_gui.audio import CHUNK_BYTES, G1AudioPort
 from robot_gui.control import ControlError, ControlService, ControlSettings
 from robot_gui.main import RuntimeSettings, create_app
-
 from test_real_telemetry import TelemetryTestAdapter
 
 
@@ -29,8 +27,7 @@ def sample_action(frames: int = 4) -> dict[str, Any]:
     return {
         "group": "arms",
         "frames": [
-            {"t": round(index * 0.04, 4), "q": [0.0] * 14}
-            for index in range(frames)
+            {"t": round(index * 0.04, 4), "q": [0.0] * 14} for index in range(frames)
         ],
     }
 
@@ -40,7 +37,9 @@ def sample_pcm(milliseconds: int = 200) -> bytes:
 
 
 class FakeTelemetry:
-    def __init__(self, *, fresh: bool = True, fsm_id: int | None = 501, mode_machine: int = 5):
+    def __init__(
+        self, *, fresh: bool = True, fsm_id: int | None = 501, mode_machine: int = 5
+    ):
         self._fresh = fresh
         self._fsm_id = fsm_id
         self._mode_machine = mode_machine
@@ -51,7 +50,9 @@ class FakeTelemetry:
             "sources": {"low_state": {"state": state}},
             "robot": {
                 "mode_machine": self._mode_machine,
-                "fsm": None if self._fsm_id is None else {"id": self._fsm_id, "mode": None},
+                "fsm": None
+                if self._fsm_id is None
+                else {"id": self._fsm_id, "mode": None},
             },
         }
 
@@ -155,8 +156,6 @@ def test_audio_port_rejects_odd_length_and_double_play() -> None:
 
 def test_audio_port_uses_a_unique_stream_id_per_playback() -> None:
     """stream_id 必须全局唯一，否则进程重启后会撞上机器人端残留的旧流。"""
-    client = RecordingAudioClient()
-    port = G1AudioPort(client, "robot-gui")
 
     class StreamIdClient(RecordingAudioClient):
         def __init__(self) -> None:
@@ -205,6 +204,7 @@ def test_audio_port_waits_a_full_chunk_duration_between_pushes() -> None:
 
 def test_audio_port_retries_a_rejected_chunk_once() -> None:
     """机器人端偶尔会拒第一块（上一块还没播完就收到新块），重试一次应该能过。"""
+
     class FlakyClient(RecordingAudioClient):
         def __init__(self) -> None:
             super().__init__()
@@ -355,7 +355,10 @@ def test_action_summary_reports_matching_audio(tmp_path: Path) -> None:
             "/api/v1/actions/import",
             json={"name": "silent", "action": sample_action()},
         )
-        actions = {item["name"]: item for item in client.get("/api/v1/actions").json()["actions"]}
+        actions = {
+            item["name"]: item
+            for item in client.get("/api/v1/actions").json()["actions"]
+        }
 
     assert actions["with_audio"]["has_audio"] is True
     assert actions["silent"]["has_audio"] is False

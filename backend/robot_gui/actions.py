@@ -6,6 +6,7 @@ ECHO-G 转出的上肢轨迹就是这个格式，可以直接导入再回放到�
 
 数据目录由 ROBOT_GUI_DATA_DIR 指定，未配置时写操作明确失败，不静默回退到安装目录。
 """
+
 from __future__ import annotations
 
 import json
@@ -91,10 +92,16 @@ class ActionStore:
             raise ValueError("动作文件必须是 JSON 对象")
         group = raw.get("group")
         frames = raw.get("frames")
-        if not isinstance(group, str) or not isinstance(frames, list) or len(frames) < 2:
+        if (
+            not isinstance(group, str)
+            or not isinstance(frames, list)
+            or len(frames) < 2
+        ):
             raise ValueError("动作文件缺少 group 或 frames")
         times = [frame.get("t") for frame in frames if isinstance(frame, dict)]
-        if len(times) != len(frames) or not all(isinstance(value, (int, float)) for value in times):
+        if len(times) != len(frames) or not all(
+            isinstance(value, (int, float)) for value in times
+        ):
             raise ValueError("动作帧缺少时间轴")
         source = raw.get("source")
         return ActionSummary(

@@ -9,6 +9,7 @@
 - 控制会话进行中拒绝切换；
 - 机器人拒绝（错误码非 0）时如实报错，不假装成功。
 """
+
 from __future__ import annotations
 
 from typing import Any

@@ -18,29 +18,27 @@
 
 同一时刻只允许一个控制会话。
 """
+
 from __future__ import annotations
 
-import logging
 import threading
 import time
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-
 from g1_action_studio.model import ArmModel
 from g1_action_studio.motion import Action, StartPose
 from g1_action_studio.planner import plan_sequence
 from g1_action_studio.robot import RobotSession
+from loguru import logger
 
 from .actions import ActionStore, ActionStoreError
 from .audio import G1AudioPort, pcm_duration_s
 from .gravity import GravityFeedforward, install_gravity_command_builder
 from .profile import LOWER_BODY_JOINT_NAMES
-
-logger = logging.getLogger(__name__)
 
 #: 本工作台的接管范围：双臂 14 关节 + 腰 3 关节。
 #:
@@ -72,7 +70,7 @@ DEFAULT_GAINS: dict[str, dict[str, float]] = {
 UPPER_JOINT_COUNT = 17
 
 
-class ControlPhase(str, Enum):
+class ControlPhase(StrEnum):
     IDLE = "idle"
     PLANNING = "planning"
     ACQUIRING = "acquiring"
@@ -128,7 +126,9 @@ class TrackingMonitor:
     def update(self, target: np.ndarray, measured: np.ndarray | None) -> None:
         if measured is None:
             return
-        error = np.abs(np.asarray(target, dtype=float) - np.asarray(measured, dtype=float))
+        error = np.abs(
+            np.asarray(target, dtype=float) - np.asarray(measured, dtype=float)
+        )
         self._max = np.maximum(self._max, error)
         self._sum += error
         self._count += 1
@@ -181,9 +181,7 @@ class LowerBodyMonitor:
 
     def capture_baseline(self, angles: dict[str, float]) -> None:
         self._baseline = {
-            name: value
-            for name, value in angles.items()
-            if name in self._joint_names
+            name: value for name, value in angles.items() if name in self._joint_names
         }
         self._max_drift = 0.0
         self._max_joint = ""
@@ -321,7 +319,9 @@ class ControlService:
                 lower.update(self._measured_named())
             cancel.wait(0.02)
 
-    def _set_phase(self, phase: ControlPhase, message: str = "", error_code: str = "") -> None:
+    def _set_phase(
+        self, phase: ControlPhase, message: str = "", error_code: str = ""
+    ) -> None:
         with self._lock:
             self._phase = phase
             self._message = message
@@ -353,7 +353,9 @@ class ControlService:
         fsm = snapshot["robot"]["fsm"]
         fsm_id = None if fsm is None else fsm.get("id")
         if fsm_id is None:
-            raise ControlError("fsm_unknown", "读不到机器人 FSM 状态，拒绝下发控制命令。")
+            raise ControlError(
+                "fsm_unknown", "读不到机器人 FSM 状态，拒绝下发控制命令。"
+            )
         if fsm_id not in self._settings.fsm_whitelist:
             raise ControlError(
                 "fsm_not_allowed",
@@ -523,9 +525,9 @@ class ControlService:
                 return
             error = self._audio.play(pcm, cancel)
             if error:
-                logger.warning("PCM 推流失败（%s）", error)
+                logger.warning("PCM 推流失败（{}）", error)
                 return
-            logger.info("讲解语音播放完成（PCM 推流 %.2f 秒）", pcm_duration_s(pcm))
+            logger.info("讲解语音播放完成（PCM 推流 {:.2f} 秒）", pcm_duration_s(pcm))
 
         thread = threading.Thread(target=worker, name="robot-gui-audio", daemon=True)
         thread.start()
@@ -536,9 +538,7 @@ def arm_joint_names() -> tuple[str, ...]:
     """被接管的双臂 14 关节名（studio 顺序：左臂 7 + 右臂 7）。"""
     from g1_action_studio.model import GROUPS, UPPER_JOINTS
 
-    return tuple(
-        UPPER_JOINTS[index].replace("_joint", "") for index in GROUPS["arms"]
-    )
+    return tuple(UPPER_JOINTS[index].replace("_joint", "") for index in GROUPS["arms"])
 
 
 def measured_pose_provider(hub: Any):
@@ -551,7 +551,9 @@ def measured_pose_provider(hub: Any):
             return None
         try:
             leg = np.array([angles[name.replace("_joint", "")] for name in LEG_JOINTS])
-            upper = np.array([angles[name.replace("_joint", "")] for name in UPPER_JOINTS])
+            upper = np.array(
+                [angles[name.replace("_joint", "")] for name in UPPER_JOINTS]
+            )
         except KeyError:
             return None
         if not (np.isfinite(leg).all() and np.isfinite(upper).all()):
@@ -579,7 +581,10 @@ def load_gains(path: Path | None) -> dict[str, dict[str, float]] | None:
         raise ValueError(f"增益配置含未知分组：{', '.join(sorted(unknown))}")
     for group, values in raw.items():
         if not isinstance(values, dict) or set(values) != {
-            "hold_kp", "hold_kd", "teach_kp", "teach_kd"
+            "hold_kp",
+            "hold_kd",
+            "teach_kp",
+            "teach_kd",
         }:
             raise ValueError(f"增益配置 {group} 缺少 hold/teach 的 kp/kd")
         for name, value in values.items():

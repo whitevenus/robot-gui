@@ -30,14 +30,14 @@ Python SDK 里还有几个语义化的糖：`ZeroTorque()` = SetFsmId(0)、`Damp
 另外：**高层运动服务依赖内置运控，进入调试模式后内置运控完全退出、高层运动服务失效。**
 所以接管腿（`rt/lowcmd` 全 29 关节）那条路和模式切换是互斥的。
 """
+
 from __future__ import annotations
 
-import logging
 import time
 from dataclasses import dataclass
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 #: 模式切换的落定等待上限。固件接受 SetFsmId 后不会立刻换状态，实测要好几秒。
 #: 2026-10-21 真机实测：等 2.5 秒回读还是旧模式，等 10 秒才切过去。
@@ -107,19 +107,19 @@ class FsmSettings:
     allowed: tuple[int, ...] | None = None
 
     @classmethod
-    def from_env(cls, raw: str | None) -> "FsmSettings":
+    def from_env(cls, raw: str | None) -> FsmSettings:
         allowed: list[int] = []
         for part in (raw or "").split(","):
             entry = part.strip()
             if not entry:
                 continue
             if not entry.isdigit():
-                logger.warning("忽略非数字的 FSM 模式 ID %r。", entry)
+                logger.warning("忽略非数字的 FSM 模式 ID {!r}。", entry)
                 continue
             fsm_id = int(entry)
             if fsm_id not in MODES_BY_ID:
                 logger.warning(
-                    "忽略不在目录里的 FSM 模式 ID %d，可选：%s",
+                    "忽略不在目录里的 FSM 模式 ID {}，可选：{}",
                     fsm_id,
                     ", ".join(str(item) for item in sorted(MODES_BY_ID)),
                 )
@@ -171,9 +171,12 @@ class FsmService:
         if not isinstance(fsm, dict):
             return {"id": None}
         return {"id": fsm.get("id")}
+
     def _reason(self) -> str:
         if not self._controls_enabled:
-            return "真机控制未开启（ROBOT_GUI_CONTROLS_ENABLED=1）前不允许切换运动模式。"
+            return (
+                "真机控制未开启（ROBOT_GUI_CONTROLS_ENABLED=1）前不允许切换运动模式。"
+            )
         return ""
 
     def state(self) -> dict[str, Any]:
@@ -250,7 +253,7 @@ class FsmService:
             {"id": after.get("id"), "mode": after.get("mode")},
         )
         if after.get("id") == fsm_id:
-            logger.info("FSM 模式已切换：%s → %s", before.get("id"), fsm_id)
+            logger.info("FSM 模式已切换：{} → {}", before.get("id"), fsm_id)
             return self.state()
 
         # 官方对每个切换接口都写了"最终状态切换是否成功取决于内置运控的状态切换逻辑"，
