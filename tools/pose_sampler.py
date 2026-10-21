@@ -16,11 +16,11 @@
 
 **纯订阅，不发任何控制命令**，不会干扰正在跑的回放。
 """
+
 from __future__ import annotations
 
 import argparse
 import json
-import math
 import threading
 import time
 from pathlib import Path
@@ -127,7 +127,9 @@ def main() -> int:
                 "waist_yaw": snapshot["waist_q"].get(12),
                 "waist_roll": snapshot["waist_q"].get(13),
                 "waist_pitch": snapshot["waist_q"].get(14),
-                "waist_modes": [snapshot["waist_mode"].get(slot) for slot in WAIST_SLOTS],
+                "waist_modes": [
+                    snapshot["waist_mode"].get(slot) for slot in WAIST_SLOTS
+                ],
                 "hip_pitch": snapshot["hip_pitch"],
                 "torso_pitch": snapshot["torso_pitch"],
                 "cmd_weight": snapshot["cmd_weight"],

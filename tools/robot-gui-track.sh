@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # 回放一次动作并打印逐关节跟踪误差、躯干姿态变化，以及腰的 mode 回读。
 #
-# 用法: bash ~/robot-gui-track.sh <动作名>   例如 p1_s2
+# 用法: ./tools/robot-gui-track.sh <动作名>   例如 p1_s2
 #
-# 采样器在仓库里（tools/pose_sampler.py），跟着代码一起部署，不再放在 /tmp
+# 脚本和采样器都在仓库的 tools/ 下，跟着代码一起部署，不往家目录散落。
+# 数据文件（pose_samples.json）写 /tmp，那是临时产物，重启即清。
 # —— 以前放 /tmp，机器人重启就没了，track.sh 直接跑不起来。
 #
 # 判读要点（详见 docs/deployment-g1.md §6.3）：
