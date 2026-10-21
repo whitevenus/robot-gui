@@ -69,15 +69,15 @@ echo
 echo "=== 回放后 ==="
 show_state
 echo
-echo "=== 下盘漂移（腰/腿偏离接管瞬间）==="
+echo "=== 下盘守卫（腿看相对偏离，腰 14 看绝对前倾）==="
 curl -sS --max-time 10 $BASE/api/v1/control/state | python3 -c "
 import json,sys
 lb=json.load(sys.stdin).get('lower_body') or {}
 if not lb:
     print('  (无数据)'); raise SystemExit
-print('  阈值 %.1f°  最大漂移 %.2f° @%s  腰14漂移 %.2f°  越限=%s' % (
+print('  阈值 %.1f°  腿/腰最大偏离 %.2f° @%s  腰14前倾峰值 %.2f°  腰14回位 %.2f°  越限=%s' % (
     lb['threshold_deg'], lb['max_drift_deg'], lb['max_drift_joint'] or '-',
-    lb['waist_pitch_drift_deg'], lb['violated']))
+    lb.get('waist_pitch_lean_deg', 0.0), lb['waist_pitch_drift_deg'], lb['violated']))
 "
 echo
 echo "=== 逐关节跟踪误差（命令目标 vs 实测）==="
@@ -154,8 +154,8 @@ if sent:
     print('  我们发的腰槽位 mode  :', sorted(set(sent)))
 print()
 print('  判读：')
-print('    腰14 前倾 < 5° 且稳      → 腰的支撑力矩够用，方案成立')
-print('    腰14 前倾 5~15°          → 支撑力矩不够，按 50 Nm 力矩上限往上调 kp')
-print('    腰14 顶到 +30° 附近      → 力矩饱和或增益没生效，查腰的 kp/kd 与 tau')
+print('    腰14 前倾峰值 < 5° 且稳   → 腰的支撑力矩够用，方案成立（守卫同口径）')
+print('    腰14 前倾峰值 5~15°      → 支撑力矩不够，按 50 Nm 力矩上限往上调 kp')
+print('    腰14 前倾峰值 顶到 +30° 附近 → 力矩饱和或增益没生效，查腰的 kp/kd 与 tau')
 print('    腰 mode 回读全程 1        → 正常，per-motor mode 不影响腰的行为')
 "

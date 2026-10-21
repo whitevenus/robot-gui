@@ -163,6 +163,16 @@ class LowerBodyMonitor:
     躯干前倾要看**腰 14 的关节角**，不能用 IMU 判：IMU 装在骨盆上，
     腰倒 23° 时 IMU pitch 只变 2.4°，根本反映不出来。
 
+    **腰 14 按"绝对前倾角"判，腿按"相对接管瞬间的偏离"判**（2026-10-21 改口径）：
+
+    - 腰 14 的危险是**前倾**（机械限位 +29.8°，失控实测瘫到 +32.8°），
+      判据是绝对角：峰值前倾 < 5° 说明支撑力矩够用。
+    - 早先腰 14 也按"相对接管瞬间的偏离"判，等于把**接管瞬间本身就后仰的那
+      1.4°** 也算进去：前倾 3.85° + 初始 −1.4° = 5.26°，于是 9 个动作里有 2 个
+      误报越限，而同一批数据按"前倾峰值"判全部在 5° 内。两个口径不是一回事，
+      守卫要跟判读口径一致。
+    - 腿没有这个问题：它的危险是底盘歪掉，相对接管姿态的偏离才是对的量。
+
     漂移是**延迟**出现的：手臂停住后平衡控制器才慢慢挪腰/腿，约 1 秒量级，
     而且发生在整条计划跑完之后，只看动作期间的同步检查永远抓不到。
     """
@@ -178,6 +188,7 @@ class LowerBodyMonitor:
         self._max_drift = 0.0
         self._max_joint = ""
         self._waist_pitch_drift = 0.0
+        self._waist_pitch_lean = 0.0
 
     def capture_baseline(self, angles: dict[str, float]) -> None:
         self._baseline = {
@@ -186,6 +197,7 @@ class LowerBodyMonitor:
         self._max_drift = 0.0
         self._max_joint = ""
         self._waist_pitch_drift = 0.0
+        self._waist_pitch_lean = 0.0
 
     def update(self, angles: dict[str, float]) -> float:
         if not self._baseline:
@@ -193,6 +205,9 @@ class LowerBodyMonitor:
         worst = 0.0
         worst_joint = ""
         for name in self._joint_names:
+            # 腰 14 单独按绝对前倾角判，不参与"相对接管姿态"的偏离统计。
+            if name == "waist_pitch":
+                continue
             baseline = self._baseline.get(name)
             if baseline is None:
                 continue
@@ -208,21 +223,30 @@ class LowerBodyMonitor:
             self._max_drift = drift_deg
             self._max_joint = worst_joint
         waist = angles.get("waist_pitch")
-        if waist is not None and "waist_pitch" in self._baseline:
-            self._waist_pitch_drift = float(
-                np.degrees(abs(waist - self._baseline["waist_pitch"]))
+        if waist is not None:
+            # 前倾为正：峰值前倾角是绝对量，初始后仰不该算进前倾。
+            self._waist_pitch_lean = max(
+                self._waist_pitch_lean, float(np.degrees(max(0.0, waist)))
             )
+            if "waist_pitch" in self._baseline:
+                self._waist_pitch_drift = float(
+                    np.degrees(abs(waist - self._baseline["waist_pitch"]))
+                )
         return drift_deg
 
     @property
     def violated(self) -> bool:
-        return self._max_drift > self._threshold
+        return (
+            self._max_drift > self._threshold
+            or self._waist_pitch_lean > self._threshold
+        )
 
     def report(self) -> dict[str, Any]:
         return {
             "threshold_deg": self._threshold,
             "max_drift_deg": round(self._max_drift, 3),
             "max_drift_joint": self._max_joint,
+            "waist_pitch_lean_deg": round(self._waist_pitch_lean, 3),
             "waist_pitch_drift_deg": round(self._waist_pitch_drift, 3),
             "violated": self.violated,
         }

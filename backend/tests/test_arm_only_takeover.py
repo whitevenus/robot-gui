@@ -230,7 +230,7 @@ def test_lower_body_monitor_ignores_arm_motion() -> None:
 
 
 def test_lower_body_monitor_still_catches_waist_drift() -> None:
-    """腰 14 漂了 8° 必须报出来，真实腰 14 漂移 0.17° 则不报。"""
+    """腰 14 前倾 8° 必须报出来，真实腰 14 漂移 0.17° 则不报。"""
     monitor = LowerBodyMonitor(threshold_deg=5.0)
     baseline = {joint.name: 0.0 for joint in G1_29DOF_JOINTS}
     monitor.capture_baseline(baseline)
@@ -244,8 +244,47 @@ def test_lower_body_monitor_still_catches_waist_drift() -> None:
     leaning["waist_pitch"] = np.deg2rad(8.0)
     monitor.update(leaning)
     assert monitor.violated is True
-    assert monitor.report()["max_drift_joint"] == "waist_pitch"
+    assert monitor.report()["waist_pitch_lean_deg"] == pytest.approx(8.0, abs=0.01)
     assert monitor.report()["waist_pitch_drift_deg"] == pytest.approx(8.0, abs=0.01)
+
+
+def test_lower_body_monitor_judges_waist_by_absolute_forward_lean() -> None:
+    """腰 14 按**绝对前倾角**判，不按"相对接管瞬间的偏离"判。
+
+    2026-10-21 真机实测：接管瞬间腰本来就后仰 1.4°，动作中前倾到 +3.85°。
+    按旧口径算成 3.85 + 1.4 = 5.25° 就越了 5° 线，于是 9 个动作里误报 2 个；
+    按前倾峰值判是 3.85°，在阈值内，守卫和判读脚本说的是同一件事。
+    """
+    monitor = LowerBodyMonitor(threshold_deg=5.0)
+    baseline = {joint.name: 0.0 for joint in G1_29DOF_JOINTS}
+    baseline["waist_pitch"] = np.deg2rad(-1.4)
+    monitor.capture_baseline(baseline)
+
+    leaning = dict(baseline)
+    leaning["waist_pitch"] = np.deg2rad(3.85)
+    monitor.update(leaning)
+
+    report = monitor.report()
+    assert report["waist_pitch_lean_deg"] == pytest.approx(3.85, abs=0.01)
+    # 偏离接管姿态 5.25°（旧口径会报越限），但前倾峰值 3.85° 没越限。
+    assert report["waist_pitch_drift_deg"] == pytest.approx(5.25, abs=0.01)
+    assert monitor.violated is False
+
+
+def test_lower_body_monitor_still_catches_leg_drift() -> None:
+    """腿的危险是底盘歪掉，仍然按相对接管姿态的偏离判。"""
+    monitor = LowerBodyMonitor(threshold_deg=5.0)
+    baseline = {joint.name: 0.0 for joint in G1_29DOF_JOINTS}
+    monitor.capture_baseline(baseline)
+
+    moved = dict(baseline)
+    moved["left_hip_pitch"] = np.deg2rad(7.0)
+    monitor.update(moved)
+
+    report = monitor.report()
+    assert report["max_drift_deg"] == pytest.approx(7.0, abs=0.01)
+    assert report["max_drift_joint"] == "left_hip_pitch"
+    assert monitor.violated is True
 
 
 def test_lower_body_monitor_watches_legs_and_waist_only() -> None:
