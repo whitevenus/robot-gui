@@ -43,18 +43,22 @@ def _bootstrap() -> None:
 
 
 def _course_clips(data_dir: Path) -> list[tuple[float, bytes]]:
-    """按课程清单拼出整套语音时间线：(起始秒数, PCM)。"""
+    """按课程清单算出各段讲解的**推流时刻**：(起始秒数, PCM)。
+
+    时刻跟回放时一致：先等一段进入衔接段，然后每段动作的讲解落在它自己的
+    起始时刻上，段间留出一段衔接的静音。
+    """
     course = json.loads((data_dir / "course.json").read_text(encoding="utf-8"))
     transition = float(os.getenv("ROBOT_GUI_TRANSITION_SECONDS", "2.0"))
     clips: list[tuple[float, bytes]] = []
-    offset = 0.0
+    at = transition
     for name in course["actions"]:
         body = json.loads((data_dir / f"{name}.json").read_text(encoding="utf-8"))
         duration = float(body["frames"][-1]["t"])
         pcm_path = data_dir / "audio" / f"{name}.pcm"
         if pcm_path.is_file():
-            clips.append((offset, pcm_path.read_bytes()))
-        offset += duration + transition
+            clips.append((at, pcm_path.read_bytes()))
+        at += duration + transition
     return clips
 
 
@@ -73,13 +77,13 @@ def main() -> int:
 
     _bootstrap()
 
-    from robot_gui.audio import G1AudioPort, build_timeline
+    from robot_gui.audio import G1AudioPort
 
     data_dir = Path(os.getenv("ROBOT_GUI_DATA_DIR", str(PROJECT_ROOT / "data")))
     if args.course:
         clips = _course_clips(data_dir)
-        pcm = build_timeline(clips)
-        print(f"整套语音 {len(clips)} 段，共 {len(pcm) / 32000:.2f} 秒", flush=True)
+        total = max(at + len(pcm) / 32000 for at, pcm in clips)
+        print(f"整套语音 {len(clips)} 段，共 {total:.2f} 秒", flush=True)
     else:
         path = data_dir / "audio" / f"{args.name}.pcm"
         if not path.is_file():
@@ -87,11 +91,12 @@ def main() -> int:
             return 1
         pcm = path.read_bytes()
         print(f"播放 {path.name}，{len(pcm) / 32000:.2f} 秒", flush=True)
+        clips = [(0.0, pcm)]
 
     # 推流在独立子进程里做（它自己建 DDS 通道），这里只把网卡传给它。
     os.environ["ROBOT_GUI_DDS_INTERFACE"] = args.interface
     port = G1AudioPort(args.app_name)
-    error = port.play(pcm, threading.Event())
+    error = port.play(clips, threading.Event())
     if error:
         print(f"播放失败：{error}", file=sys.stderr)
         return 1

@@ -23,12 +23,13 @@ PCM 从 stdin 读（不在命令行里传，也不落临时文件）。stdout �
 
 协议要点（官方《音频灯光服务接口》）：
 
-- `PlayStream(app_name, stream_id, pcm)` **整段一次推完**。实测一次推 3.2 MB
-  （整套课程 100 秒的讲解）返回码 0、往返 0.37 秒。
-- **不要分块推**：同一个 stream_id 连续推，机器人端播放出来是沙沙声（2026-10-21
-  真机实测：开头正常，后面全白噪声）。官方例程的分块写法在本机上不成立。
-- `stream_id` **相同为缓存续播，不同则打断播放**。所以失败时**不能**用同一个
-  stream_id 重推（机器人端会把已播内容再播一遍），换新的则会打断当前播放。
+- `PlayStream(app_name, stream_id, pcm)` **每一段语音整段一次推完**。实测一次推
+  3.2 MB（整套课程 100 秒的讲解）返回码 0、往返 0.37 秒。
+- **每一段语音用自己的 stream_id**。官方接口写明「stream_id 相同为缓存续播，
+  不同则打断播放」：同一段语音切成多块续播，真机实测播出来是沙沙声和重复内容
+  （2026-10-21）；不同的语音就配不同的 id，段与段之间互不干扰。
+- 失败时**不能**重推：同 stream_id 重推会让机器人端把已播内容再播一遍；
+  换新 stream_id 则会打断当前播放。两种都比断在半截更糟，所以如实报错。
 - 服务端的播放是异步的：推完不等于播完，要等整段时长过去再 `PlayStop`，
   立刻停会掐掉尾巴。
 - PCM 必须是 16 kHz / 单声道 / 16 bit。
@@ -43,6 +44,7 @@ import signal
 import sys
 import threading
 import time
+from collections.abc import Sequence
 
 SAMPLE_RATE = 16000
 BYTES_PER_SECOND = SAMPLE_RATE * 2
@@ -73,30 +75,64 @@ def _wait_until(deadline: float, stopped: threading.Event) -> None:
 def _push_stream(
     client: object,
     app_name: str,
-    stream_id: str,
-    pcm: bytes,
+    session_id: str,
+    blob: bytes,
+    specs: Sequence[tuple[int, int, int]],
     stopped: threading.Event,
+    started: float,
 ) -> int:
-    """整段推一次，返回机器人端的返回码（0 = 接受）。"""
-    if stopped.is_set():
-        return 0
-    reply = client.PlayStream(app_name, stream_id, pcm)  # type: ignore[attr-defined]
-    return reply[0] if isinstance(reply, tuple) else reply
+    """按各自的时刻**分段推**。
+
+    每一段是独立的语音，**各自用自己的 stream_id**：官方接口「stream_id 不同则
+    打断播放」，所以段与段之间不能共用一个 id（共用会让服务器按"缓存续播"处理，
+    真机实测播出来是沙沙声和重复内容）。
+    """
+    for index, (at_ms, offset, length) in enumerate(specs):
+        _wait_until(started + at_ms / 1000.0, stopped)
+        if stopped.is_set():
+            return 0
+        stream_id = f"{session_id}-{index}"
+        reply = client.PlayStream(  # type: ignore[attr-defined]
+            app_name, stream_id, blob[offset : offset + length]
+        )
+        code = reply[0] if isinstance(reply, tuple) else reply
+        if code != 0:
+            return code
+    return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="把一段 PCM 推给 G1 扬声器")
+    # 起点取进程一开始的时刻：子进程初始化 DDS 要 0.7 秒左右，各段的推流时刻是
+    # 相对动作轨迹的 t=0 的，那段时间要被初始化吃掉。
+    started = time.monotonic()
+    parser = argparse.ArgumentParser(description="把若干段 PCM 按时刻推给 G1 扬声器")
     parser.add_argument("--app-name", default="robot-gui")
-    parser.add_argument("--stream-id", required=True)
+    parser.add_argument("--stream-id", required=True, help="本次播放的会话 ID")
+    parser.add_argument(
+        "--clips",
+        required=True,
+        help="各段描述：起始毫秒:字节偏移:字节长度，逗号分隔",
+    )
     parser.add_argument(
         "--interface", default=os.getenv("ROBOT_GUI_DDS_INTERFACE", "eth0")
     )
     parser.add_argument("--timeout", type=float, default=10.0)
     args = parser.parse_args()
 
-    pcm = sys.stdin.buffer.read()
-    if not pcm or len(pcm) % 2:
-        _report({"code": -1, "error": "invalid_pcm"})
+    specs: list[tuple[int, int, int]] = []
+    for item in args.clips.split(","):
+        parts = item.split(":")
+        if len(parts) != 3:
+            _report({"code": -1, "error": f"clip 描述不合法：{item!r}"})
+            return 1
+        specs.append((int(parts[0]), int(parts[1]), int(parts[2])))
+    if not specs:
+        _report({"code": -1, "error": "没有要播的片段"})
+        return 1
+
+    blob = sys.stdin.buffer.read()
+    if not blob:
+        _report({"code": -1, "error": "空的 PCM"})
         return 1
 
     # 被后端取消时（SIGTERM）要收尾：停掉正在播的音频再退出。
@@ -117,9 +153,10 @@ def main() -> int:
     client.SetTimeout(args.timeout)
     client.Init()
 
-    started = time.monotonic()
     try:
-        code = _push_stream(client, args.app_name, args.stream_id, pcm, stopped)
+        code = _push_stream(
+            client, args.app_name, args.stream_id, blob, specs, stopped, started
+        )
     except Exception as error:  # noqa: BLE001 - 推流异常要如实报出去
         _report({"code": -1, "error": repr(error)})
         return 1
@@ -128,9 +165,9 @@ def main() -> int:
         _stop_audio(client, args.app_name)
         return 1
 
-    # 推完不等于播完：服务端的播放是异步的，等整段时长过去再收尾。
-    deadline = started + len(pcm) / BYTES_PER_SECOND + TAIL_SINK_S
-    _wait_until(deadline, stopped)
+    # 推完不等于播完：服务端的播放是异步的，等最后一段播完再收尾。
+    last_end_ms = max(at + length * 1000 // BYTES_PER_SECOND for at, _, length in specs)
+    _wait_until(started + (last_end_ms + TAIL_SINK_S * 1000) / 1000.0, stopped)
     _stop_audio(client, args.app_name)
     _report({"code": 0})
     return 0

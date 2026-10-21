@@ -47,9 +47,14 @@ WORKER_MARGIN_S = 15.0
 
 
 class AudioPusher(Protocol):
-    """把整段 PCM 推给扬声器。返回空串表示成功，否则返回稳定错误码。"""
+    """按各自的时刻把若干段 PCM 推给扬声器。
 
-    def push(self, stream_id: str, pcm: bytes, stop: threading.Event) -> str: ...
+    返回空串表示成功，否则返回稳定错误码。
+    """
+
+    def push(
+        self, clips: Sequence[tuple[float, bytes]], stop: threading.Event
+    ) -> str: ...
 
     def stop(self) -> None: ...
 
@@ -62,8 +67,24 @@ class WorkerAudioPusher:
         self._python = python_executable or sys.executable
         self._lock = threading.Lock()
         self._process: subprocess.Popen[bytes] | None = None
+        self._sequence = 0
 
-    def build_command(self, stream_id: str) -> list[str]:
+    def next_session_id(self) -> str:
+        """本次播放的会话 ID：时间戳 + 进程内序号，保证跨进程、跨播放都不撞。
+
+        光靠时间戳不够：系统时钟的粒度是毫秒级（Windows 上是 15.6 ms），
+        连续两次播放会拿到同一个 id，撞上机器人端残留的旧流。
+        """
+        with self._lock:
+            self._sequence += 1
+            sequence = self._sequence
+        return f"{self._app_name}-{time.time_ns()}-{sequence}"
+
+    def build_command(
+        self, session_id: str, specs: Sequence[tuple[int, int, int]]
+    ) -> list[str]:
+        """specs = [(起始毫秒, 在整条二进制流里的字节偏移, 该段字节长度), ...]"""
+        spec = ",".join(f"{at}:{offset}:{length}" for at, offset, length in specs)
         return [
             self._python,
             "-m",
@@ -71,13 +92,24 @@ class WorkerAudioPusher:
             "--app-name",
             self._app_name,
             "--stream-id",
-            stream_id,
+            session_id,
+            "--clips",
+            spec,
         ]
 
-    def push(self, stream_id: str, pcm: bytes, stop: threading.Event) -> str:
+    def push(self, clips: Sequence[tuple[float, bytes]], stop: threading.Event) -> str:
+        # 各段 PCM 拼成一条二进制流，子进程按字节偏移切出来**分段推**：
+        # 每一段是独立的语音，用自己的 stream_id（官方接口「stream_id 不同则打断
+        # 播放」，所以段与段之间不能共用一个 id）。
+        blob = bytearray()
+        specs: list[tuple[int, int, int]] = []
+        for at, pcm in clips:
+            specs.append((round(at * 1000), len(blob), len(pcm)))
+            blob.extend(pcm)
+        session_id = self.next_session_id()
         try:
             process = subprocess.Popen(  # noqa: S603 - 命令是固定拼装的，没有外部输入
-                self.build_command(stream_id),
+                self.build_command(session_id, specs),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -87,10 +119,12 @@ class WorkerAudioPusher:
             return "audio.worker_spawn_failed"
         with self._lock:
             self._process = process
-        # PCM 从 stdin 灌进去：不在命令行里传（太长），也不落临时文件。
-        threading.Thread(target=_feed, args=(process, pcm), daemon=True).start()
+        # 二进制流从 stdin 灌进去：不在命令行里传（太长），也不落临时文件。
+        threading.Thread(target=_feed, args=(process, bytes(blob)), daemon=True).start()
 
-        deadline = time.monotonic() + pcm_duration_s(pcm) + WORKER_MARGIN_S
+        # 播到最后一段结束为止。
+        last_end = max(at + pcm_duration_s(pcm) for at, pcm in clips)
+        deadline = time.monotonic() + last_end + WORKER_MARGIN_S
         while process.poll() is None:
             if stop.is_set():
                 process.terminate()
@@ -123,33 +157,6 @@ def pcm_duration_s(pcm: bytes) -> float:
     return len(pcm) / BYTES_PER_SECOND
 
 
-def build_timeline(clips: Sequence[tuple[float, bytes]]) -> bytes:
-    """把若干段 PCM 按各自的起始时刻拼成**一条**连续的 PCM。
-
-    `clips` 是 (相对起点的秒数, PCM) 列表。段与段之间补静音，这样每段讲解都
-    落在动作自己的时刻上——动作之间还插着衔接段，按序号硬拼会越走越偏。
-
-    拼成一条而不是分段推，是因为官方接口「stream_id 不同则打断播放」：
-    分段推的话，后一段会把还没播完的前一段掐断。
-    """
-    out = bytearray()
-    cursor = 0.0
-    for offset, pcm in sorted(clips, key=lambda item: item[0]):
-        if offset < cursor - 1e-6:
-            # 上一段还没结束这一段就该开始了：语音会整体往后拖，如实记一笔。
-            logger.warning(
-                "语音片段 {} 秒处与上一段重叠 {:.2f} 秒，后续讲解会整体延后。",
-                offset,
-                cursor - offset,
-            )
-        gap = int(round((offset - cursor) * BYTES_PER_SECOND))
-        if gap > 0:
-            out.extend(b"\x00" * gap)
-        out.extend(pcm)
-        cursor = offset + len(pcm) / BYTES_PER_SECOND
-    return bytes(out)
-
-
 def validate_pcm(pcm: bytes) -> None:
     if not pcm:
         raise AudioError("audio.empty", "音频数据为空。")
@@ -177,22 +184,26 @@ class G1AudioPort:
     def playing(self) -> bool:
         return self._playing
 
-    def play(self, pcm: bytes, stop: threading.Event) -> str:
-        """整段推流播放；返回空串表示完成，否则返回稳定错误码。"""
-        try:
-            validate_pcm(pcm)
-        except AudioError as error:
-            return error.code
+    def play(self, clips: Sequence[tuple[float, bytes]], stop: threading.Event) -> str:
+        """按各自的时刻推流播放；返回空串表示完成，否则返回稳定错误码。
+
+        `clips` 是 (相对起点的秒数, PCM) 列表，**每一段是独立的语音**，
+        各自用自己的 stream_id 推。
+        """
+        if not clips:
+            return ""
+        for _, pcm in clips:
+            try:
+                validate_pcm(pcm)
+            except AudioError as error:
+                return error.code
         with self._lock:
             if self._playing:
                 return "audio.already_playing"
-            # 全局唯一的流 ID：时间戳保证跨进程不撞上机器人端残留的旧流，
-            # 序号保证同一进程内连续两次播放也不撞（毫秒级时间戳会撞）。
             self._sequence += 1
-            stream_id = f"{self._app_name}-{time.time_ns()}-{self._sequence}"
             self._playing = True
         try:
-            error = self._pusher.push(stream_id, pcm, stop)
+            error = self._pusher.push(clips, stop)
         except Exception:  # noqa: BLE001 - 推流异常统一收敛成错误码
             logger.exception("语音推流异常。")
             error = "audio.sdk_exception"

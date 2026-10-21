@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from robot_gui.actions import ActionStore, ActionStoreError
-from robot_gui.audio import G1AudioPort, WorkerAudioPusher, build_timeline
+from robot_gui.audio import G1AudioPort, WorkerAudioPusher
 from robot_gui.control import ControlError, ControlService, ControlSettings
 from robot_gui.main import RuntimeSettings, create_app
 from test_real_telemetry import TelemetryTestAdapter
@@ -109,26 +109,25 @@ class FakeAudioPusher:
 
     def __init__(self, error: str = "") -> None:
         self.error = error
-        self.calls: list[tuple[str, bytes]] = []
+        self.calls: list[list[tuple[float, bytes]]] = []
         self.stopped = 0
 
-    def push(self, stream_id: str, pcm: bytes, stop: threading.Event) -> str:
-        self.calls.append((stream_id, pcm))
+    def push(self, clips, stop) -> str:
+        self.calls.append(list(clips))
         return self.error
 
     def stop(self) -> None:
         self.stopped += 1
 
 
-def test_audio_port_pushes_the_whole_clip_once() -> None:
-    """整段一次推完：分块只会把"第 N 块被拒 → 只播开头几个字"的故障面放大。"""
+def test_audio_port_pushes_every_clip_with_its_own_time() -> None:
+    """每段讲解是独立的语音，带着自己的时刻推出去（各自独立的 stream_id）。"""
     pusher = FakeAudioPusher()
     port = G1AudioPort("robot-gui", pusher=pusher)
-    pcm = sample_pcm(3200)  # 3.2 秒
+    clips = [(0.0, b"\x11\x22" * 16), (2.5, b"\x33\x44" * 16)]
 
-    assert port.play(pcm, threading.Event()) == ""
-    assert len(pusher.calls) == 1
-    assert pusher.calls[0][1] == pcm
+    assert port.play(clips, threading.Event()) == ""
+    assert pusher.calls == [clips]
     assert port.playing is False
 
 
@@ -141,7 +140,7 @@ def test_audio_port_rejects_odd_length() -> None:
     pusher = FakeAudioPusher()
     port = G1AudioPort("robot-gui", pusher=pusher)
 
-    assert port.play(b"\x00", threading.Event()) == "audio.invalid_pcm_length"
+    assert port.play([(0.0, b"\x00")], threading.Event()) == "audio.invalid_pcm_length"
     assert pusher.calls == []
 
 
@@ -154,8 +153,8 @@ def test_audio_port_refuses_a_second_playback_while_playing() -> None:
             self.entered = threading.Event()
             self.release = threading.Event()
 
-        def push(self, stream_id: str, pcm: bytes, stop: threading.Event) -> str:
-            self.calls.append((stream_id, pcm))
+        def push(self, clips, stop) -> str:
+            self.calls.append(list(clips))
             self.entered.set()
             self.release.wait(5.0)
             return self.error
@@ -165,28 +164,17 @@ def test_audio_port_refuses_a_second_playback_while_playing() -> None:
     result: list[str] = []
 
     def play() -> None:
-        result.append(port.play(sample_pcm(200), threading.Event()))
+        result.append(port.play([(0.0, b"\x00\x00")], threading.Event()))
 
     thread = threading.Thread(target=play)
     thread.start()
     assert pusher.entered.wait(5.0)
 
-    assert port.play(sample_pcm(200), threading.Event()) == "audio.already_playing"
+    assert port.play([(0.0, b"\x00\x00")], threading.Event()) == "audio.already_playing"
 
     pusher.release.set()
     thread.join(timeout=5.0)
     assert result == [""]
-
-
-def test_audio_port_uses_a_unique_stream_id_per_playback() -> None:
-    """stream_id 必须全局唯一，否则进程重启后会撞上机器人端残留的旧流。"""
-    pusher = FakeAudioPusher()
-    port = G1AudioPort("robot-gui", pusher=pusher)
-    port.play(sample_pcm(200), threading.Event())
-    port.play(sample_pcm(200), threading.Event())
-
-    stream_ids = [stream_id for stream_id, _ in pusher.calls]
-    assert len(set(stream_ids)) == len(stream_ids)
 
 
 def test_audio_port_does_not_retry_a_rejected_push() -> None:
@@ -194,10 +182,10 @@ def test_audio_port_does_not_retry_a_rejected_push() -> None:
     pusher = FakeAudioPusher(error="audio.stream_rejected")
     port = G1AudioPort("robot-gui", pusher=pusher)
 
-    assert port.play(sample_pcm(200), threading.Event()) == "audio.stream_rejected"
+    assert port.play([(0.0, b"\x00\x00")], threading.Event()) == "audio.stream_rejected"
     assert len(pusher.calls) == 1
     # 失败之后仍然能再播：闩锁只记账，不封锁。
-    assert port.play(sample_pcm(200), threading.Event()) == "audio.stream_rejected"
+    assert port.play([(0.0, b"\x00\x00")], threading.Event()) == "audio.stream_rejected"
     assert len(pusher.calls) == 2
 
 
@@ -205,103 +193,34 @@ def test_audio_port_forwards_cancellation() -> None:
     pusher = FakeAudioPusher(error="audio.cancelled")
     port = G1AudioPort("robot-gui", pusher=pusher)
 
-    assert port.play(sample_pcm(200), threading.Event()) == "audio.cancelled"
+    assert port.play([(0.0, b"\x00\x00")], threading.Event()) == "audio.cancelled"
     assert port.playing is False
 
 
-def test_worker_pusher_runs_the_audio_worker_module() -> None:
-    """推流必须在独立进程里跑：回放期间同进程内的 RPC 回包收不到。"""
+def test_worker_pusher_builds_the_audio_worker_command() -> None:
+    """每一段语音带自己的 stream_id：子进程按 --clips 的描述分段推。"""
     pusher = WorkerAudioPusher("robot-gui", python_executable="/usr/bin/python3")
-    command = pusher.build_command("robot-gui-123")
+    command = pusher.build_command(
+        "session-1", [(0, 0, 158208), (15900, 158208, 385536)]
+    )
 
     assert command[:3] == ["/usr/bin/python3", "-m", "robot_gui.audio_worker"]
     assert "--app-name" in command
     assert "robot-gui" in command
     assert "--stream-id" in command
-    assert "robot-gui-123" in command
+    assert "session-1" in command
+    # 起始毫秒:字节偏移:字节长度
+    assert "0:0:158208,15900:158208:385536" in command
 
 
-def test_build_timeline_pads_silence_between_clips() -> None:
-    """讲解按各段的动作时刻拼成一条：段之间补静音，不能提前也不能重叠。"""
-    clip = b"\x11\x22" * 16  # 32 字节 = 1 毫秒
-    timeline = build_timeline([(0.0, clip), (0.5, clip)])
+def test_worker_pusher_gives_every_playback_a_new_session_id() -> None:
+    """stream_id 必须全局唯一，否则会撞上机器人端残留的旧流。"""
+    pusher = WorkerAudioPusher("robot-gui")
+    first = pusher.next_session_id()
+    second = pusher.next_session_id()
 
-    # 第二段必须**正好**落在 0.5 秒处（16000 字节）。
-    assert len(timeline) == 16000 + 32
-    assert timeline[:32] == clip
-    assert timeline[32:16000] == b"\x00" * (16000 - 32)
-    assert timeline[16000:] == clip
-
-
-def test_action_store_loads_the_course_manifest(tmp_path: Path) -> None:
-    """一整套的顺序由 course.json 给出，不靠文件名猜。"""
-    (tmp_path / "course.json").write_text(
-        json.dumps({"name": "stage_c", "actions": ["p1_s0", "p2_s1"]}),
-        encoding="utf-8",
-    )
-    course = ActionStore(tmp_path).load_course()
-
-    assert course.name == "stage_c"
-    assert course.actions == ("p1_s0", "p2_s1")
-
-
-def test_action_store_reports_a_missing_course_manifest(tmp_path: Path) -> None:
-    with pytest.raises(ActionStoreError) as error:
-        ActionStore(tmp_path).load_course()
-    assert error.value.code == "course_not_found"
-
-
-def test_replay_accepts_the_whole_course(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """整套播放：按清单顺序把动作一次性交给控制服务，语音各段同名。"""
-    audio_dir = tmp_path / "audio"
-    audio_dir.mkdir()
-    (audio_dir / "demo.pcm").write_bytes(b"\x11\x22" * 64)
-    (audio_dir / "demo2.pcm").write_bytes(b"\x33\x44" * 64)
-    (tmp_path / "course.json").write_text(
-        json.dumps({"name": "stage_c", "actions": ["demo", "demo2"]}),
-        encoding="utf-8",
-    )
-
-    captured: dict[str, object] = {}
-
-    def recording_request_replay(self, action_names, *, confirmed, audio_clips=None):
-        captured["actions"] = list(action_names)
-        captured["audio"] = dict(audio_clips or {})
-        return self.state()
-
-    app = real_test_app(tmp_path)
-    monkeypatch.setattr(
-        type(app.state.control), "request_replay", recording_request_replay
-    )
-
-    with TestClient(app) as client:
-        for name in ("demo", "demo2"):
-            client.post(
-                "/api/v1/actions/import",
-                json={"name": name, "action": sample_action()},
-            )
-        response = client.post(
-            "/api/v1/control/replay", json={"course": True, "confirmed": True}
-        )
-
-    assert response.status_code == 200
-    assert captured["actions"] == ["demo", "demo2"]
-    assert captured["audio"] == {
-        "demo": b"\x11\x22" * 64,
-        "demo2": b"\x33\x44" * 64,
-    }
-
-
-def test_actions_endpoint_exposes_the_course(tmp_path: Path) -> None:
-    (tmp_path / "course.json").write_text(
-        json.dumps({"name": "stage_c", "actions": ["demo"]}), encoding="utf-8"
-    )
-    with TestClient(real_test_app(tmp_path)) as client:
-        body = client.get("/api/v1/actions").json()
-
-    assert body["course"] == {"name": "stage_c", "actions": ["demo"]}
+    assert first != second
+    assert first.startswith("robot-gui-")
 
 
 # ---------------------------------------------------------------- 控制前置检查

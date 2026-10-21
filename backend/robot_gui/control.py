@@ -37,7 +37,7 @@ from g1_action_studio.robot import RobotSession
 from loguru import logger
 
 from .actions import ActionStore, ActionStoreError
-from .audio import G1AudioPort, build_timeline, pcm_duration_s
+from .audio import G1AudioPort
 from .gravity import GravityFeedforward, install_gravity_command_builder
 from .profile import LOWER_BODY_JOINT_NAMES
 
@@ -495,10 +495,11 @@ class ControlService:
                 self._set_phase(ControlPhase.ACQUIRING, "接管双臂控制权")
                 session.acquire()
                 if self._audio is not None and audio_clips:
-                    timeline = self._build_timeline(names, marks, audio_clips)
-                    if timeline:
-                        # 语音等"进入衔接段"过去再起播：那一刻正好是第一个动作的起点。
-                        audio_thread = self._start_audio(timeline, cancel, marks[0])
+                    clips = self._build_clips(names, marks, audio_clips)
+                    if clips:
+                        # 语音线程在接管后立刻起步，和轨迹同时开始；各段的推流
+                        # 时刻由子进程按动作的起始时刻执行。
+                        audio_thread = self._start_audio(clips, cancel)
                 self._set_phase(
                     ControlPhase.PLAYING,
                     f"回放 {actions[0].group}，轨迹 {trajectory.duration:.1f} 秒",
@@ -551,29 +552,27 @@ class ControlService:
                 self._worker = None
 
     @staticmethod
-    def _build_timeline(
+    def _build_clips(
         names: list[str], marks: list[float], clips: dict[str, bytes]
-    ) -> bytes:
-        """把各段讲解按动作在轨迹里的起始时刻拼成一条连续的 PCM。
+    ) -> list[tuple[float, bytes]]:
+        """各段讲解按动作在轨迹里的起始时刻排好。
 
-        缺的段（没有同名 pcm）就让它空着，不能让后面的提前。
+        时刻是**相对轨迹 t=0 的绝对值**：语音线程在接管后立刻起步（和轨迹同时
+        开始），子进程自己按这些时刻把一段段推出去——每一段是独立的语音，
+        各自用自己的 stream_id，段与段之间不会互相打断。
         """
-        base = marks[0]
-        return build_timeline(
-            [
-                (mark - base, clips[name])
-                for name, mark in zip(names, marks, strict=True)
-                if name in clips
-            ]
-        )
+        return [
+            (mark, clips[name])
+            for name, mark in zip(names, marks, strict=True)
+            if name in clips
+        ]
 
     def _start_audio(
         self,
-        pcm: bytes,
+        clips: list[tuple[float, bytes]],
         cancel: threading.Event,
-        start_delay: float,
     ) -> threading.Thread:
-        """让讲解语音与动作本体对齐：进入衔接段结束后再起播。
+        """让讲解语音与动作本体对齐：每段语音在它自己那一段动作开始的时刻起播。
 
         **只走课程包原声的 PCM 推流，不做 TTS 兜底。** 兜底播的是云端合成的另一套
         音色，和课程包对不上；讲不出原声就不出声，比出个错的音色好。
@@ -581,13 +580,11 @@ class ControlService:
         assert self._audio is not None
 
         def worker() -> None:
-            if cancel.wait(start_delay):
-                return
-            error = self._audio.play(pcm, cancel)
+            error = self._audio.play(clips, cancel)
             if error:
                 logger.warning("PCM 推流失败（{}）", error)
                 return
-            logger.info("讲解语音播放完成（PCM 推流 {:.2f} 秒）", pcm_duration_s(pcm))
+            logger.info("讲解语音播放完成（{} 段）", len(clips))
 
         thread = threading.Thread(target=worker, name="robot-gui-audio", daemon=True)
         thread.start()
