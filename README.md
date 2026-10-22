@@ -65,6 +65,9 @@ npm run dev
 
 打开 Vite 输出的 URL。页面会显示实际的 SDK2/DDS 连接状态以及接收数据源的新鲜度。
 
+机器人本机的算力板（Orin NX、JetPack、CUDA 状态、装东西的硬规矩）见
+[`docs/robot-hardware.md`](docs/robot-hardware.md)。
+
 ## 真机控制
 
 不设置 `ROBOT_GUI_CONTROLS_ENABLED=1` 就不会接受任何真机控制。开启后，回放请求

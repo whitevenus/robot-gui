@@ -25,6 +25,9 @@
 
 ## 2. 后端环境
 
+算力板本身（Orin NX、JetPack、CUDA、驱动状态、装东西的硬规矩）见
+[`robot-hardware.md`](robot-hardware.md)。
+
 ### 2.1 Python 版本
 
 机器人的 `~/venvs/g1-sdk` 是 **Python 3.8.10**（unitree-sdk2py 1.0.1）。
