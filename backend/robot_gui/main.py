@@ -5,6 +5,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,10 +24,12 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
+from starlette.responses import StreamingResponse
 
 from .actions import ActionStore, ActionStoreError
 from .adapters import TelemetryAdapter, UnitreeSdkTelemetryAdapter
-from .audio import AudioPusher, G1AudioPort
+from .audio import AudioPusher, G1AudioPort, pcm_duration_s
+from .camera import DepthCamera
 from .control import (
     ControlError,
     ControlService,
@@ -34,7 +38,7 @@ from .control import (
     measured_pose_provider,
 )
 from .course_import import MAX_PACKAGE_BYTES, CourseImportError, import_course
-from .courses import CourseStore, CourseStoreError
+from .courses import DEFAULT_COURSE_ID, CourseStore, CourseStoreError
 from .fsm import FsmError, FsmService, FsmSettings
 from .gravity import GravityFeedforward, default_model_path
 from .records import RecordStore, RecordStoreError
@@ -178,6 +182,7 @@ def create_app(
     settings: RuntimeSettings | None = None,
     telemetry_adapter: TelemetryAdapter | None = None,
     audio_pusher: AudioPusher | None = None,
+    camera: DepthCamera | None = None,
 ) -> FastAPI:
     runtime_settings = settings or RuntimeSettings.from_env()
 
@@ -203,6 +208,7 @@ def create_app(
     records = RecordStore(
         runtime_settings.records_dir or (PROJECT_ROOT / "logs" / "records")
     )
+    depth_camera = camera or DepthCamera()
     control = ControlService(
         settings=ControlSettings(
             interface=runtime_settings.dds_interface or "",
@@ -253,12 +259,15 @@ def create_app(
             except Exception:  # noqa: BLE001 - 清理失败不能盖掉原始异常
                 logger.exception("Failed to clean up the Unitree telemetry adapter.")
             raise
+        # 深度相机取流是尽力而为的：起不来只记原因，不影响后端启动。
+        depth_camera.start()
         try:
             yield
         finally:
             control.release()
             if audio_port is not None:
                 audio_port.stop()
+            depth_camera.stop()
             try:
                 await asyncio.to_thread(adapter.stop)
             except Exception:  # noqa: BLE001 - 收尾失败只记日志，不阻断退出
@@ -515,6 +524,111 @@ def create_app(
     async def release() -> dict[str, Any]:
         return control.release()
 
+    @app.post("/api/v1/control/audio")
+    async def play_audio(payload: dict[str, Any]) -> dict[str, Any]:
+        """只播放讲解语音：机器人不动，也不接管控制权。
+
+        - `{"name": "p1_s2"}`：放一段
+        - `{"course": "<课程 id>"}`：按课程顺序放整套讲解
+
+        语音走的是回放时同一条推流路径（PCM → 独立子进程 → 扬声器），所以听到的
+        就是回放时的效果，只是这次机器人一动不动。
+        """
+        if audio_port is None:
+            raise _error(
+                "audio_disabled",
+                "语音推流未开启：设 ROBOT_GUI_AUDIO_ENABLED=1 后重启后端。",
+                status=409,
+            )
+        if audio_port.playing:
+            raise _error(
+                "audio_already_playing", "正在播语音，请等它播完再试。", status=409
+            )
+        port = audio_port
+        course_id = payload.get("course")
+        name = payload.get("name")
+        if course_id is True:
+            course_id = DEFAULT_COURSE_ID
+        if isinstance(course_id, str) and course_id:
+            try:
+                record = courses.read(course_id)
+            except CourseStoreError as error:
+                raise _error(error.code, str(error), status=404) from error
+            clips = _narration_clips(
+                store,
+                [(item.name, item.duration_s) for item in record.segments],
+                runtime_settings.transition_seconds,
+            )
+        elif isinstance(name, str) and name:
+            pcm = _read_audio(store, name, required=True)
+            clips = [(0.0, pcm)] if pcm is not None else []
+        else:
+            raise _error(
+                "audio_target_required",
+                "要给出动作名 name 或课程 id course。",
+                status=400,
+            )
+        if not clips:
+            raise _error("audio_not_found", "找不到对应的讲解语音。", status=404)
+
+        def worker() -> None:
+            error = port.play(clips, threading.Event())
+            if error:
+                logger.warning("只播讲解语音失败（{}）", error)
+
+        threading.Thread(target=worker, name="robot-gui-narration", daemon=True).start()
+        return {
+            "clips": len(clips),
+            "duration_s": round(max(at + pcm_duration_s(pcm) for at, pcm in clips), 2),
+        }
+
+    # ---- 深度相机 ----
+
+    @app.get("/api/v1/camera/state")
+    async def camera_state() -> dict[str, Any]:
+        """深度相机当前能不能用，以及不能用时的原因。"""
+        return depth_camera.state()
+
+    @app.get("/api/v1/camera/frame")
+    async def camera_frame() -> Response:
+        """最新一帧（JPEG）。取不到就 404，并把原因写进 detail。"""
+        frame = depth_camera.latest_frame()
+        if frame is None:
+            state = depth_camera.state()
+            raise _error(
+                state["error_code"] or "camera.unavailable",
+                state["error_message"] or "深度相机暂时没有画面。",
+                status=404,
+            )
+        return Response(content=frame, media_type="image/jpeg")
+
+    @app.get("/api/v1/camera/stream")
+    async def camera_stream() -> StreamingResponse:
+        """MJPEG 推流：浏览器直接用 <img src> 就能显示，不用前端轮询。"""
+        boundary = "frame"
+
+        async def frames():
+            while True:
+                frame = await asyncio.to_thread(depth_camera.latest_frame)
+                if frame is None:
+                    await asyncio.sleep(0.2)
+                    continue
+                yield (
+                    (
+                        f"--{boundary}\r\n"
+                        "Content-Type: image/jpeg\r\n"
+                        f"Content-Length: {len(frame)}\r\n\r\n"
+                    ).encode("ascii")
+                    + frame
+                    + b"\r\n"
+                )
+
+        return StreamingResponse(
+            frames(),
+            media_type=f"multipart/x-mixed-replace; boundary={boundary}",
+            headers={"Cache-Control": "no-store"},
+        )
+
     # ---- 执行记录 ----
 
     @app.get("/api/v1/records")
@@ -573,6 +687,26 @@ def create_app(
             return
 
     return app
+
+
+def _narration_clips(
+    store: ActionStore,
+    segments: Sequence[tuple[str, float]],
+    transition: float,
+) -> list[tuple[float, bytes]]:
+    """只播讲解时的推流时刻表：(起始秒数, PCM)。
+
+    和 tools/play_audio.py 同一套拼法：每段讲解之间留一段衔接的静音，
+    听起来和整套回放时一致。
+    """
+    clips: list[tuple[float, bytes]] = []
+    at = transition
+    for name, duration in segments:
+        pcm = store.read_audio(name)
+        if pcm is not None:
+            clips.append((at, pcm))
+        at += duration + transition
+    return clips
 
 
 def _read_audio(store: ActionStore, name: str, required: bool = False) -> bytes | None:
