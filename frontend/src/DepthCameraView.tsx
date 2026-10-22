@@ -10,6 +10,7 @@ interface CameraState {
   error_code: string;
   error_message: string;
   source: string;
+  color: boolean;
   frames: number;
   frame_age_s: number | null;
 }
@@ -62,6 +63,11 @@ export function DepthCameraView() {
         <h2>深度相机</h2>
         <div className="card-head-actions">
           {state?.source ? <span className="meta">{state.source}</span> : null}
+          {state && available && !state.color ? (
+            <span className="src-state state-delayed" title="抓到的不是彩色流">
+              灰度
+            </span>
+          ) : null}
           <span
             className={`src-state ${
               state === null ? "state-unknown" : available ? "state-fresh" : "state-offline"

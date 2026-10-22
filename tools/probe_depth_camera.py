@@ -88,6 +88,9 @@ def probe_video_devices() -> None:
         print("没有 OpenCV，跳过实际取帧。")
         return
     for device in devices:
+        name = device_name(device)
+        if name:
+            print(f"{device}  名字：{name}")
         capture = cv2.VideoCapture(str(device))
         if not capture.isOpened():
             print(f"{device}：打不开。")
@@ -100,7 +103,27 @@ def probe_video_devices() -> None:
             print(f"{device}：取到 {frame.shape[1]}×{frame.shape[0]}，已保存 {path}")
         else:
             print(f"{device}：打开了但读不出帧。")
+        # 再按**原始格式**读一帧：通道数才说明这是不是彩色流。
+        capture.set(cv2.CAP_PROP_CONVERT_RGB, 0)
+        ok, raw = capture.read()
         capture.release()
+        if ok and raw is not None:
+            channels = 1 if raw.ndim == 2 else int(raw.shape[2])
+            kind = {1: "灰度（红外或深度流）", 2: "YUYV（有色）", 3: "BGR（有色）"}.get(
+                channels, "未知"
+            )
+            print(
+                f"    原始格式 {raw.shape[1]}×{raw.shape[0]}，{channels} 通道 → {kind}"
+            )
+
+
+def device_name(device: Path) -> str:
+    """设备名（内核给的，通常带模组和流的名字）。"""
+    path = Path("/sys/class/video4linux") / device.name / "name"
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def probe_depth_libraries() -> None:

@@ -35,16 +35,39 @@ class CameraError(RuntimeError):
         self.code = code
 
 
+def _frame_channels(frame: Any) -> int:
+    """帧的通道数：1=灰度，2=YUYV（有色），3=BGR。"""
+    return 1 if frame.ndim == 2 else int(frame.shape[2])
+
+
+def _to_bgr(frame: Any) -> Any:
+    """把原始帧统一成 BGR，JPEG 编码才认。
+
+    关掉 OpenCV 自动转色之后，YUYV 设备给的是两通道原始缓冲，得自己转。
+    """
+    import cv2  # noqa: PLC0415 - 按需导入
+
+    channels = _frame_channels(frame)
+    if channels == 2:
+        return cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_YUY2)
+    if channels == 1:
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    return frame
+
+
 class V4l2Grabber:
     """从 V4L2 设备取帧（G1 头部的相机在机器上就是 /dev/video*）。
 
     2026-10-22 真机实测（`tools/probe_depth_camera.py`）：**videohub RPC 不通**
-    （返回 3102），`pyrealsense2` / `pyorbbec` 都没装，但 `/dev/video0`、`/dev/video2`、
-    `/dev/video4` 能读到 16:9 的画面（256×144 / 424×240 / 320×180）——这三个是同一个
-    头部相机在不同分辨率下的输出节点，偶数号能读，奇数号是配对的元数据节点。
+    （返回 3102），`pyrealsense2` / `pyorbbec` 都没装，能用的是 V4L2。
 
-    所以默认走 V4L2 + OpenCV：**分辨率最高的那个设备**优先。哪一路真是头部相机，
-    看一眼画面就知道；要指定设备就设 `ROBOT_GUI_DEPTH_CAMERA_DEVICE`。
+    **深度相机在 V4L2 下会露出好几个输出节点**：彩色流、红外流、深度流。
+    红外和深度是 1 通道的灰度画面——抓错节点的话，页面上就是一张黑白照片
+    （2026-10-22 实测：先抓到了灰度的那路）。
+
+    所以挑设备时**优先选有颜色的**：关掉 OpenCV 的自动转色后，通道数才说明
+    这条流本身是不是彩色的（1=灰度，2=YUYV 有色，3=BGR 有色）。彩色流里再挑
+    分辨率最高的。要指定设备就设 `ROBOT_GUI_DEPTH_CAMERA_DEVICE`。
     """
 
     def __init__(self, device: str) -> None:
@@ -52,6 +75,7 @@ class V4l2Grabber:
         self._capture: Any = None
         self._width = 0
         self._height = 0
+        self._channels = 0
 
     @property
     def device(self) -> str:
@@ -61,8 +85,14 @@ class V4l2Grabber:
     def size(self) -> tuple[int, int]:
         return self._width, self._height
 
+    @property
+    def color(self) -> bool:
+        """这条流有没有颜色（红外/深度流是灰度的）。"""
+        return self._channels >= 2
+
     def describe(self) -> str:
-        return f"{self._device}（{self._width}×{self._height}）"
+        kind = "彩色" if self.color else "灰度"
+        return f"{self._device}（{self._width}×{self._height}·{kind}）"
 
     def open(self) -> None:
         try:
@@ -79,9 +109,18 @@ class V4l2Grabber:
                 "camera.device_unavailable",
                 f"打不开相机设备 {self._device}。",
             )
+        # 关掉自动转色：这样拿到的通道数才说明这条流本身是不是彩色的。
+        capture.set(cv2.CAP_PROP_CONVERT_RGB, 0)
+        ok, frame = capture.read()
+        if not ok or frame is None:
+            capture.release()
+            raise CameraError("camera.grab_failed", f"{self._device} 打开后读不出帧。")
         self._capture = capture
-        self._width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self._height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self._channels = _frame_channels(frame)
+        self._width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or int(frame.shape[1])
+        self._height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or int(
+            frame.shape[0]
+        )
 
     def close(self) -> None:
         if self._capture is not None:
@@ -96,33 +135,37 @@ class V4l2Grabber:
         ok, frame = self._capture.read()
         if not ok or frame is None:
             raise CameraError("camera.grab_failed", f"{self._device} 读不出帧。")
-        encoded, buffer = cv2.imencode(".jpg", frame)
+        encoded, buffer = cv2.imencode(".jpg", _to_bgr(frame))
         if not encoded:
             raise CameraError("camera.encode_failed", "这一帧编码成 JPEG 失败。")
         return bytes(buffer)
 
     @staticmethod
     def pick() -> str:
-        """挑一个能用的设备：能读到画面、且分辨率最高的那个。"""
+        """挑一个能用的设备：**优先有颜色的**，其次分辨率最高的。"""
         try:
             import cv2  # noqa: PLC0415 - 按需导入
         except ImportError:
             return "/dev/video0"
         best_device = ""
         best_pixels = 0
+        best_color = False
         for path in sorted(Path("/dev").glob("video*")):
             capture = cv2.VideoCapture(str(path), cv2.CAP_V4L2)
             if not capture.isOpened():
                 capture.release()
                 continue
+            capture.set(cv2.CAP_PROP_CONVERT_RGB, 0)
             ok, frame = capture.read()
             capture.release()
             if not ok or frame is None:
                 continue
+            color = _frame_channels(frame) >= 2
             pixels = int(frame.shape[1]) * int(frame.shape[0])
-            if pixels > best_pixels:
-                best_pixels = pixels
-                best_device = str(path)
+            if color and not best_color:
+                best_device, best_pixels, best_color = str(path), pixels, True
+            elif color == best_color and pixels > best_pixels:
+                best_device, best_pixels = str(path), pixels
         if not best_device:
             raise CameraError(
                 "camera.no_device",
@@ -159,6 +202,7 @@ class DepthCamera:
         self._error_code = ""
         self._error_message = ""
         self._source = ""
+        self._color = True
         self._frames = 0
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -199,6 +243,7 @@ class DepthCamera:
                 "error_code": self._error_code,
                 "error_message": self._error_message,
                 "source": self._source,
+                "color": self._color,
                 "frames": self._frames,
                 "frame_age_s": round(age, 3) if age is not None else None,
             }
@@ -266,9 +311,10 @@ class DepthCamera:
             self._error_message = ""
 
     def _set_source(self) -> None:
-        """记下画面来自哪儿（设备号和分辨率），页面要显示。"""
+        """记下画面来自哪儿（设备号、分辨率、有没有颜色），页面要显示。"""
         describe = getattr(self._grabber, "describe", None)
         if describe is None:
             return
         with self._lock:
             self._source = str(describe())
+            self._color = bool(getattr(self._grabber, "color", True))

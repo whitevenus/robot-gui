@@ -8,13 +8,29 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
+import numpy as np
 from fastapi.testclient import TestClient
 
-from robot_gui.camera import CameraError, DepthCamera
+from robot_gui.camera import CameraError, DepthCamera, _frame_channels
 from robot_gui.main import RuntimeSettings, create_app
 from test_real_telemetry import TelemetryTestAdapter
 
 JPEG = b"\xff\xd8\xff\xe0 fake jpeg \xff\xd9"
+
+
+def test_frame_channels_tells_color_from_grayscale() -> None:
+    """通道数才说明这条流本身有没有颜色。
+
+    深度相机在 V4L2 下会露出彩色流、红外流、深度流；红外和深度是 1 通道的
+    灰度画面，抓错节点的话页面上就是一张黑白照片。
+    """
+    gray = np.zeros((4, 4), dtype=np.uint8)
+    yuyv = np.zeros((4, 4, 2), dtype=np.uint8)
+    bgr = np.zeros((4, 4, 3), dtype=np.uint8)
+
+    assert _frame_channels(gray) == 1
+    assert _frame_channels(yuyv) == 2
+    assert _frame_channels(bgr) == 3
 
 
 class FakeGrabber:
