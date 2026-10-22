@@ -321,6 +321,7 @@ class ControlService:
 
     def state(self) -> dict[str, Any]:
         with self._lock:
+            current_index, current_action, elapsed_s = self._playback_position()
             return {
                 "phase": self._phase.value,
                 "message": self._message,
@@ -337,7 +338,32 @@ class ControlService:
                 "default_speed": self._settings.replay_speed,
                 "current_speed": self._current_speed,
                 "resume_actions": list(self._resume_names),
+                # 播到哪一段了：外部（真机课堂页）靠它把画面跟到机器人当前位置，
+                # 不能自己算时间——轨迹里有衔接段、暂停续播还会重新规划。
+                "current_action": current_action,
+                "current_index": current_index,
+                "elapsed_s": elapsed_s,
             }
+
+    def _playback_position(self) -> tuple[int, str, float]:
+        """当前位置：正在播的动作名、它在本次运行里的下标、已播秒数。
+
+        口径与 `_remaining_after` 一致：marks 是**各段动作本体**在轨迹里的起始
+        时刻，已经起播的段数就是"播到哪儿了"。当前段是最后一段已起播的动作
+        （还没起播时算第 0 段）。
+
+        没在播时返回 (-1, "", 0.0)。
+        """
+        with self._lock:
+            started = self._play_started
+            names = list(self._run_names)
+            marks = list(self._run_marks)
+        if started is None or not names or not marks:
+            return -1, "", 0.0
+        elapsed = max(0.0, time.monotonic() - started)
+        started_count = sum(1 for mark in marks if mark <= elapsed)
+        index = min(max(started_count - 1, 0), len(names) - 1)
+        return index, names[index], round(elapsed, 3)
 
     def _measured_arms(self) -> np.ndarray | None:
         """当前实测的双臂 14 维关节角（studio 顺序：左臂 7 + 右臂 7）。"""
@@ -834,6 +860,8 @@ class ControlService:
                 self._session = None
                 self._trajectory = None
                 self._pause_trajectory = None
+                # 播完（或被中止）之后不再有"当前位置"：复位了 elapsed_s 才不会一直涨。
+                self._play_started = None
             self._write_record(
                 recorder,
                 outcome=outcome,
