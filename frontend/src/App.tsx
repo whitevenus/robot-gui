@@ -1,12 +1,14 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 
 import { readError } from "./api";
-import { ActionWorkbench } from "./ActionWorkbench";
+import { ConfirmProvider, useConfirm } from "./ConfirmDialog";
 import { CourseDetail } from "./CourseDetail";
 import { CourseList } from "./CourseList";
+import { DepthCameraView } from "./DepthCameraView";
 import { ExecutionRecords } from "./ExecutionRecords";
 import { FsmPanel, fsmModeLabel, type FsmModeInfo, type FsmState } from "./FsmPanel";
 import { JointPanel, type JointRow } from "./JointPanel";
+import { ThemeSwitcher } from "./ThemeSwitcher";
 
 const G1Viewer = lazy(() =>
   import("./G1Viewer").then((module) => ({ default: module.G1Viewer })),
@@ -132,13 +134,10 @@ type SourceState = TelemetrySnapshot["sources"][string]["state"];
 interface TelemetryBadgesProps {
   bms: BmsReading | null;
   bmsState: SourceState;
-  bmsAge: number | null;
   hipImuRpy: number[] | null | undefined;
   hipImuState: SourceState;
-  hipImuAge: number | null;
   torsoImuRpy: number[] | null | undefined;
   torsoImuState: SourceState;
-  torsoImuAge: number | null;
 }
 
 /**
@@ -146,18 +145,18 @@ interface TelemetryBadgesProps {
  *
  * 这些量以前挤在左侧导航里，导航一多就没地方放；收成徽标后导航只留页面切换，
  * 常用的状态读数仍在视线高度。
+ *
+ * **只报新鲜度，不报毫秒数**：数据年龄每帧都在变，写在页头上会让整排徽标不停
+ * 抖动，页面读起来很累。精确的年龄在控制台总览的「数据年龄」一栏里有。
  */
 function TelemetryBadges(props: TelemetryBadgesProps) {
   const {
     bms,
     bmsState,
-    bmsAge,
     hipImuRpy,
     hipImuState,
-    hipImuAge,
     torsoImuRpy,
     torsoImuState,
-    torsoImuAge,
   } = props;
   const bmsTemperature = bms ? validChannels(bms.temperature_raw).join(", ") : "";
 
@@ -169,7 +168,6 @@ function TelemetryBadges(props: TelemetryBadgesProps) {
           {sourceStateLabel(bmsState)}
         </span>
         <b>{bms ? `${bms.soc_pct}% SOC · SOH ${bms.soh_pct}%` : "—"}</b>
-        {bmsAge !== null && <span className="src-age">{bmsAge} ms</span>}
       </span>
       <span className="tbadge">
         <span className="tbadge-label">髋部 IMU</span>
@@ -177,7 +175,6 @@ function TelemetryBadges(props: TelemetryBadgesProps) {
           {sourceStateLabel(hipImuState)}
         </span>
         <b>{formatVector(hipImuRpy)}</b>
-        {hipImuAge !== null && <span className="src-age">{hipImuAge} ms</span>}
       </span>
       <span className="tbadge">
         <span className="tbadge-label">躯干 IMU</span>
@@ -185,13 +182,22 @@ function TelemetryBadges(props: TelemetryBadgesProps) {
           {sourceStateLabel(torsoImuState)}
         </span>
         <b>{formatVector(torsoImuRpy)}</b>
-        {torsoImuAge !== null && <span className="src-age">{torsoImuAge} ms</span>}
       </span>
     </div>
   );
 }
 
 export function App() {
+  return (
+    <ConfirmProvider>
+      <Workstation />
+    </ConfirmProvider>
+  );
+}
+
+/** 工作台本体：在 ConfirmProvider 里面，才能用统一的确认弹窗。 */
+function Workstation() {
+  const confirm = useConfirm();
   const [snapshot, setSnapshot] = useState<TelemetrySnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
@@ -284,7 +290,12 @@ export function App() {
           "机器人处于可安全瘫倒的状态后再继续。"
         : `即将把机器人切到「${mode.label}」（FSM ${mode.fsm_id}）：${mode.hint}\n\n` +
           "确认现场安全后继续。";
-      if (!window.confirm(warning)) return;
+      const accepted = await confirm({
+        title: `切换运动模式到「${mode.label}」`,
+        message: warning,
+        danger: mode.danger,
+      });
+      if (!accepted) return;
       setFsmBusy(true);
       setFsmMessage("");
       try {
@@ -305,7 +316,7 @@ export function App() {
         setFsmBusy(false);
       }
     },
-    [refreshFsm],
+    [confirm, refreshFsm],
   );
 
   const elapsedSinceSnapshot =
@@ -328,16 +339,10 @@ export function App() {
   const bmsState = bmsSource
     ? liveSourceState(bmsSource, elapsedSinceSnapshot)
     : "unknown";
-  const bmsAge = bmsSource
-    ? liveSourceAge(bmsSource, elapsedSinceSnapshot)
-    : null;
   const torsoImuSource = snapshot?.sources.torso_imu;
   const torsoImuState = torsoImuSource
     ? liveSourceState(torsoImuSource, elapsedSinceSnapshot)
     : "unknown";
-  const torsoImuAge = torsoImuSource
-    ? liveSourceAge(torsoImuSource, elapsedSinceSnapshot)
-    : null;
 
   const fsm = snapshot?.robot?.fsm ?? null;
   const fsmId = fsm?.id ?? null;
@@ -370,6 +375,16 @@ export function App() {
       text: `当前 FSM ${fsmId} 不在允许列表 [${whitelist.join(", ")}] 内，回放会被拒绝。`,
     });
   }
+
+  // 页头跟着当前视图走：课程页是课程管理/课程详情，不是执行轨迹记录。
+  const pageTitle =
+    view === "console"
+      ? { eyebrow: "Live Telemetry", title: "机器人状态工作台" }
+      : view === "records"
+        ? { eyebrow: "Execution Trace", title: "执行轨迹记录" }
+        : courseId
+          ? { eyebrow: "Course Detail", title: "课程详情" }
+          : { eyebrow: "Course Library", title: "课程管理" };
 
   return (
     <main className="workstation">
@@ -415,52 +430,23 @@ export function App() {
             <span>课程管理</span>
           </button>
         </nav>
-
-        <div className="side-note">
-          <span
-            className="status-dot"
-            style={{
-              background: controlsAvailable ? "#66d588" : "#ffc868",
-              boxShadow: controlsAvailable
-                ? "0 0 0 4px rgba(102,213,136,.14)"
-                : "0 0 0 4px rgba(255,200,104,.14)",
-            }}
-            aria-hidden="true"
-          />
-          <div>
-            <strong>
-              {controlsAvailable ? "真机控制已开启" : "真机控制未开启"}
-            </strong>
-            <small>
-              {controlsAvailable
-                ? "回放需逐次确认 · 先停止再交还控制权"
-                : "只读遥测 · 回放按钮保持禁用"}
-            </small>
-          </div>
-        </div>
+        <ThemeSwitcher />
       </aside>
 
       <div className={`main${view === "records" ? " main-records" : ""}`} id="overview">
         <header className="main-head">
           <div>
-            <p className="eyebrow">
-              {view === "console" ? "Live Telemetry" : "Execution Trace"}
-            </p>
-            <h1>
-              {view === "console" ? "机器人状态工作台" : "执行轨迹记录"}
-            </h1>
+            <p className="eyebrow">{pageTitle.eyebrow}</p>
+            <h1>{pageTitle.title}</h1>
           </div>
           <div className="head-right">
             <TelemetryBadges
               bms={bms}
               bmsState={bmsState}
-              bmsAge={bmsAge}
               hipImuRpy={snapshot?.robot?.hip_imu?.rpy}
               hipImuState={hipImuState}
-              hipImuAge={hipImuAge}
               torsoImuRpy={snapshot?.robot?.torso_imu?.rpy}
               torsoImuState={torsoImuState}
-              torsoImuAge={torsoImuAge}
             />
             <span className="mode-badge" role="status">
               {snapshot ? "REAL · 真实遥测" : "REAL · 等待连接"}
@@ -556,25 +542,29 @@ export function App() {
             ))}
 
             <div className="verify">
-              <Suspense
-                fallback={
-                  <section className="card" aria-label="G1 三维姿态模型">
-                    <p className="empty-cell" role="status">
-                      正在加载三维姿态工作台…
-                    </p>
-                  </section>
-                }
-              >
-                <G1Viewer
-                  joints={snapshot?.robot?.joints ?? []}
-                  hipImuRpy={snapshot?.robot?.hip_imu?.rpy ?? null}
-                  hipImuAgeMs={hipImuAge}
-                  hipImuState={hipImuState}
-                  lowStateAgeMs={sourceAge ?? null}
-                  lowStateState={lowStateState}
-                  modeMachine={snapshot?.robot?.mode_machine ?? null}
-                />
-              </Suspense>
+              {/* 左列上下分：3D 姿态和深度相机各占一半。 */}
+              <div className="verify-left">
+                <Suspense
+                  fallback={
+                    <section className="card" aria-label="G1 三维姿态模型">
+                      <p className="empty-cell" role="status">
+                        正在加载三维姿态工作台…
+                      </p>
+                    </section>
+                  }
+                >
+                  <G1Viewer
+                    joints={snapshot?.robot?.joints ?? []}
+                    hipImuRpy={snapshot?.robot?.hip_imu?.rpy ?? null}
+                    hipImuAgeMs={hipImuAge}
+                    hipImuState={hipImuState}
+                    lowStateAgeMs={sourceAge ?? null}
+                    lowStateState={lowStateState}
+                    modeMachine={snapshot?.robot?.mode_machine ?? null}
+                  />
+                </Suspense>
+                <DepthCameraView />
+              </div>
               <div id="joint-panel">
                 <JointPanel joints={snapshot?.robot?.joints ?? []} />
               </div>
@@ -591,13 +581,12 @@ export function App() {
           onSwitch={(mode) => void switchFsm(mode)}
         />
         {fsmMessage && <p className="rail-error">{fsmMessage}</p>}
-        <ActionWorkbench />
         <section className="rail-section" aria-label="其他真机控制能力">
           <div className="rail-section-head">
             <h2>其余真机控制能力</h2>
           </div>
           <p className="rail-reason">
-            动作回放已在上方提供。以下能力本版仍未开放，按钮保持禁用而不是给出假可用状态。
+            动作回放已移到「课程管理」页。以下能力本版仍未开放，按钮保持禁用而不是给出假可用状态。
           </p>
           <div className="control-list">
             {controlEntries.map((label) => (

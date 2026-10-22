@@ -217,7 +217,7 @@ export function ExecutionRecords() {
           <h2>{detail.label}</h2>
           <div className="card-head-actions">
             <a
-              className="link-button"
+              className="btn btn-ghost"
               href={`/api/v1/records/${encodeURIComponent(detail.id)}/download`}
               download
             >
@@ -225,7 +225,7 @@ export function ExecutionRecords() {
             </a>
             <button
               type="button"
-              className="view-reset"
+              className="btn btn-ghost"
               onClick={() => {
                 setDetail(null);
                 setSelected(null);
@@ -333,7 +333,7 @@ export function ExecutionRecords() {
           <span className="meta">{records.length} 条</span>
           <button
             type="button"
-            className="view-reset"
+            className="btn btn-ghost"
             disabled={busy}
             onClick={() => void refresh()}
           >
@@ -344,16 +344,16 @@ export function ExecutionRecords() {
       {message && <p className="rail-error">{message}</p>}
       {records.length === 0 ? (
         <p className="empty-cell">
-          还没有执行记录。在右侧动作库里回放一个动作或整套课程，这里就会出现一条。
+          还没有执行记录。在「课程管理」页回放一个动作或整套课程，这里就会出现一条。
         </p>
       ) : (
         <div className="jt">
-          <table>
+          <table className="records-table">
             <thead>
               <tr>
                 <th>开始时间</th>
                 <th>类型</th>
-                <th>名称</th>
+                <th className="col-name">名称</th>
                 <th>速度</th>
                 <th>轨迹时长</th>
                 <th>腰14前倾</th>
@@ -370,7 +370,7 @@ export function ExecutionRecords() {
                 >
                   <th>{formatTime(record.started_at)}</th>
                   <td>{record.kind === "course" ? "整套" : "单动作"}</td>
-                  <td>{record.label}</td>
+                  <td className="col-name">{record.label}</td>
                   <td className="num">{record.speed ?? "—"}×</td>
                   <td className="num">
                     {record.trajectory_duration_s?.toFixed(1) ?? "—"} s
@@ -385,8 +385,17 @@ export function ExecutionRecords() {
                       {OUTCOME_LABELS[record.outcome] ?? record.outcome}
                     </span>
                   </td>
-                  <td>
-                    <span className="link-button">详情</span>
+                  <td className="col-action">
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void openDetail(record.id);
+                      }}
+                    >
+                      详情
+                    </button>
                   </td>
                 </tr>
               ))}

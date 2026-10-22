@@ -8,6 +8,21 @@
       content="Robot GUI real-only G1 telemetry workstation; hardware controls remain disabled."
     />
     <title>Robot GUI | Real G1 Telemetry</title>
+    <script>
+      // 第一帧之前定好主题，刷新时不会先闪一下白。
+      (function () {
+        try {
+          var stored = localStorage.getItem("robot-gui-theme");
+          var light =
+            stored === "light" ||
+            (stored !== "dark" &&
+              window.matchMedia("(prefers-color-scheme: light)").matches);
+          document.documentElement.dataset.theme = light ? "light" : "dark";
+        } catch (error) {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

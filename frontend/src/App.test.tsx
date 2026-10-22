@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { App } from "./App";
 
@@ -48,6 +48,9 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  // 外观切换会写 documentElement 和 localStorage，别让用例之间串味。
+  document.documentElement.removeAttribute("data-theme");
+  window.localStorage.clear();
 });
 
 const FSM_MODES = [
@@ -199,137 +202,25 @@ describe("Real telemetry workstation", () => {
     }
   });
 
-  it("lists stored actions and refuses replay while controls are disabled", async () => {
+  it("takes the action library off the control rail", async () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     stubFetch({
-      "/api/v1/actions": {
-        actions: [
-          {
-            name: "p1_s0",
-            group: "arms",
-            frames: 98,
-            duration_s: 4.9,
-            source: "echo-g",
-            has_audio: true,
-          },
-        ],
-      },
-      "/api/v1/control/state": {
-        phase: "idle",
-        message: "",
-        action: "",
-        error_code: "",
-        available: false,
-        trajectory_duration_s: 0,
-        audio_playing: false,
-        gravity_compensation: false,
-      },
-    });
-
-    render(<App />);
-
-    expect(await screen.findByText("p1_s0")).toBeInTheDocument();
-    expect(screen.getByText("arms")).toBeInTheDocument();
-    expect(
-      screen.getByText(/真机控制未开启。设置 ROBOT_GUI_CONTROLS_ENABLED=1/),
-    ).toBeInTheDocument();
-    const replay = screen.getByRole("button", { name: /确认并回放/ });
-    expect(replay).toBeDisabled();
-  });
-
-  it("offers playing the whole course and asks the backend for it", async () => {
-    vi.stubGlobal("WebSocket", MockWebSocket);
-    const fetchMock = stubFetch({
-      "/api/v1/actions": {
-        actions: [],
-        course: { name: "stage_c", actions: ["p1_s0", "p2_s1"] },
-      },
-      "/api/v1/control/state": {
-        phase: "idle",
-        message: "",
-        action: "",
-        error_code: "",
+      "/api/v1/actions": { actions: [] },
+      "/api/v1/fsm/state": {
         available: true,
-        trajectory_duration_s: 0,
-        audio_playing: false,
-        gravity_compensation: false,
+        reason: "",
+        current: { id: null, name: "" },
+        whitelist: [501],
+        modes: FSM_MODES,
       },
-      "/api/v1/control/replay": { phase: "planning", action: "整套 2 段" },
     });
-    vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<App />);
 
-    const courseButton = await screen.findByRole("button", { name: /回放整套/ });
-    expect(courseButton).toBeEnabled();
-
-    await act(async () => {
-      courseButton.click();
-    });
-
-    const call = fetchMock.mock.calls.find(([url]) =>
-      String(url).endsWith("/api/v1/control/replay"),
-    );
-    expect(call).toBeDefined();
-    const init = call?.[1] as RequestInit | undefined;
-    // 速度由页面上的下拉给出，不再靠环境变量。
-    expect(JSON.parse(String(init?.body))).toEqual({
-      course: true,
-      confirmed: true,
-      speed: 1,
-    });
-  });
-
-  it("sends the speed picked in the dropdown with the replay request", async () => {
-    vi.stubGlobal("WebSocket", MockWebSocket);
-    const fetchMock = stubFetch({
-      "/api/v1/actions": {
-        actions: [
-          {
-            name: "p1_s0",
-            group: "arms",
-            frames: 98,
-            duration_s: 4.9,
-            source: "echo-g",
-            has_audio: true,
-          },
-        ],
-        course: { name: "stage_c", actions: ["p1_s0", "p2_s1"] },
-      },
-      "/api/v1/control/state": {
-        phase: "idle",
-        message: "",
-        action: "",
-        error_code: "",
-        available: true,
-        trajectory_duration_s: 0,
-        audio_playing: false,
-        gravity_compensation: false,
-        default_speed: 1,
-        current_speed: 1,
-        resume_actions: [],
-      },
-      "/api/v1/control/replay": { phase: "planning", action: "整套 2 段" },
-    });
-    vi.spyOn(window, "confirm").mockReturnValue(true);
-
-    render(<App />);
-
-    const speedSelect = await screen.findByLabelText("回放速度");
-    await act(async () => {
-      fireEvent.change(speedSelect, { target: { value: "0.8" } });
-    });
-
-    const courseButton = screen.getByRole("button", { name: /回放整套/ });
-    await act(async () => {
-      courseButton.click();
-    });
-
-    const call = fetchMock.mock.calls.find(([url]) =>
-      String(url).endsWith("/api/v1/control/replay"),
-    );
-    const init = call?.[1] as RequestInit | undefined;
-    expect(JSON.parse(String(init?.body)).speed).toBe(0.8);
+    // 右侧控制列只剩运动模式与尚未开放的能力，回放入口在课程管理页。
+    expect(screen.queryByText("动作库与真机回放")).not.toBeInTheDocument();
+    expect(screen.queryByText(/确认并回放/)).not.toBeInTheDocument();
+    expect(screen.getByText(/动作回放已移到「课程管理」页/)).toBeInTheDocument();
   });
 
   it("lists execution records and opens one on click", async () => {
@@ -609,7 +500,8 @@ describe("Real telemetry workstation", () => {
     expect(screen.getByText("数据延迟")).toBeInTheDocument();
     const summary = screen.getByRole("region", { name: "遥测摘要" });
     expect(within(summary).getAllByText("延迟").length).toBeGreaterThan(0);
-    expect(within(summary).getAllByText("512 ms").length).toBeGreaterThan(0);
+    // 徽标只报新鲜度：毫秒数每帧都在变，写在上面会让整排徽标不停抖动。
+    expect(within(summary).queryByText(/\d+ ms/)).not.toBeInTheDocument();
     expect(
       screen.getByText("Pose: delayed/delayed · 512/512 ms · 0 joints"),
     ).toBeInTheDocument();
@@ -690,11 +582,43 @@ describe("Real telemetry workstation", () => {
     ).toBeInTheDocument();
 
     // 切到「全部」后腿部行出现。
+    const toggle = screen.getByRole("button", { name: /只看上肢/ });
+    // 开关本身要报出当前状态，样式才画得出开/关。
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
     act(() => {
-      screen.getByRole("button", { name: /只看上肢/ }).click();
+      toggle.click();
     });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
     expect(within(jointRegion).getByText("joint_0")).toBeInTheDocument();
     expect(within(jointRegion).getAllByRole("row")).toHaveLength(1 + 5 + 29);
+  });
+
+  it("switches the appearance from the bottom-left corner", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<App />);
+
+    const trigger = screen.getByRole("button", { name: /外观/ });
+    fireEvent.click(trigger);
+    const light = screen.getByRole("menuitemradio", { name: "浅色" });
+    expect(light).toHaveAttribute("aria-checked", "false");
+    fireEvent.click(light);
+
+    // 主题落在 <html data-theme> 上，偏好存进 localStorage。
+    await waitFor(() => {
+      expect(document.documentElement.dataset.theme).toBe("light");
+    });
+    expect(window.localStorage.getItem("robot-gui-theme")).toBe("light");
+  });
+
+  it("shows the depth camera panel below the 3D pose", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<App />);
+
+    const camera = screen.getByRole("region", { name: "深度相机实时画面" });
+    expect(camera).toBeInTheDocument();
+    // 右上角有放大按钮；取不到画面时如实说连接中，不假装有画面。
+    expect(within(camera).getByRole("button", { name: "放大" })).toBeInTheDocument();
+    expect(within(camera).getByText("正在连接深度相机…")).toBeInTheDocument();
   });
 
   it("renders auxiliary telemetry with readable vectors and drops raw noise", async () => {

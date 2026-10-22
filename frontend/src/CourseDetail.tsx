@@ -2,9 +2,16 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { readError } from "./api";
+import { useConfirm } from "./ConfirmDialog";
+import {
+  SessionButtons,
+  SessionState,
+  SpeedPicker,
+  useControlSession,
+  useReplaySpeed,
+  type Notice,
+} from "./CourseControls";
 import type { Course } from "./CourseList";
-
-const SPEED_OPTIONS = [0.8, 1, 1.2];
 
 interface CourseDetailProps {
   courseId: string;
@@ -13,21 +20,24 @@ interface CourseDetailProps {
 
 export function CourseDetail({ courseId, onBack }: CourseDetailProps) {
   const [course, setCourse] = useState<Course | null>(null);
-  const [message, setMessage] = useState("");
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState(false);
-  const [speed, setSpeed] = useState(1);
+  const confirm = useConfirm();
+  const session = useControlSession();
+  const { speed, setSpeed } = useReplaySpeed(session.state?.default_speed ?? null);
+  const controlsAvailable = session.state?.available === true;
 
   const refresh = useCallback(async () => {
     try {
       const response = await fetch(`/api/v1/courses/${encodeURIComponent(courseId)}`);
       if (!response.ok) {
-        setMessage(await readError(response));
+        setNotice({ tone: "bad", text: await readError(response) });
         setCourse(null);
         return;
       }
       setCourse(await response.json());
     } catch (error) {
-      setMessage(String(error));
+      setNotice({ tone: "bad", text: String(error) });
     }
   }, [courseId]);
 
@@ -36,15 +46,15 @@ export function CourseDetail({ courseId, onBack }: CourseDetailProps) {
   }, [refresh]);
 
   async function replaySegment(name: string) {
-    if (
-      !window.confirm(
-        `即将在真机上回放 ${name}（速度 ${speed}×）。请确认现场安全、机器人处于允许的 FSM 模式。`,
-      )
-    ) {
-      return;
-    }
+    const accepted = await confirm({
+      title: "回放这一段",
+      message:
+        `即将在真机上回放 ${name}（速度 ${speed}×）。\n\n` +
+        "请确认现场安全、机器人处于允许的 FSM 模式。",
+    });
+    if (!accepted) return;
     setBusy(true);
-    setMessage("");
+    setNotice(null);
     try {
       const response = await fetch("/api/v1/control/replay", {
         method: "POST",
@@ -52,12 +62,39 @@ export function CourseDetail({ courseId, onBack }: CourseDetailProps) {
         body: JSON.stringify({ action: name, confirmed: true, speed }),
       });
       if (!response.ok) {
-        setMessage(await readError(response));
+        setNotice({ tone: "bad", text: await readError(response) });
         return;
       }
-      setMessage(`已开始回放 ${name}。`);
+      setNotice({ tone: "info", text: `已开始回放 ${name}。` });
+      await session.refresh();
     } catch (error) {
-      setMessage(String(error));
+      setNotice({ tone: "bad", text: String(error) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** 只播这一段的讲解语音：机器人不动，用来单独检查声音。 */
+  async function playNarration(name: string) {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const response = await fetch("/api/v1/control/audio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!response.ok) {
+        setNotice({ tone: "bad", text: await readError(response) });
+        return;
+      }
+      const body = await response.json();
+      setNotice({
+        tone: "info",
+        text: `已开始播放 ${name} 的讲解语音（约 ${body.duration_s} 秒），机器人没有动。`,
+      });
+    } catch (error) {
+      setNotice({ tone: "bad", text: String(error) });
     } finally {
       setBusy(false);
     }
@@ -65,17 +102,16 @@ export function CourseDetail({ courseId, onBack }: CourseDetailProps) {
 
   async function replayWhole() {
     if (!course) return;
-    if (
-      !window.confirm(
-        `即将在真机上连续回放整套课程「${course.name}」（${course.actions.length} 段，速度 ${speed}×）。`
-          + "整套是一次连续接管，中途需要停止请按停止按钮或遥控器。请确认现场安全、"
-          + "机器人处于允许的 FSM 模式。",
-      )
-    ) {
-      return;
-    }
+    const accepted = await confirm({
+      title: "回放整套课程",
+      message:
+        `即将在真机上连续回放整套课程「${course.name}」（${course.actions.length} 段，速度 ${speed}×）。\n` +
+        "整套是一次连续接管，中途需要停止请按停止按钮或遥控器。\n\n" +
+        "请确认现场安全、机器人处于允许的 FSM 模式。",
+    });
+    if (!accepted) return;
     setBusy(true);
-    setMessage("");
+    setNotice(null);
     try {
       const response = await fetch("/api/v1/control/replay", {
         method: "POST",
@@ -83,12 +119,13 @@ export function CourseDetail({ courseId, onBack }: CourseDetailProps) {
         body: JSON.stringify({ course: course.id, confirmed: true, speed }),
       });
       if (!response.ok) {
-        setMessage(await readError(response));
+        setNotice({ tone: "bad", text: await readError(response) });
         return;
       }
-      setMessage(`已开始回放「${course.name}」。`);
+      setNotice({ tone: "info", text: `已开始回放「${course.name}」。` });
+      await session.refresh();
     } catch (error) {
-      setMessage(String(error));
+      setNotice({ tone: "bad", text: String(error) });
     } finally {
       setBusy(false);
     }
@@ -109,11 +146,18 @@ export function CourseDetail({ courseId, onBack }: CourseDetailProps) {
           </div>
         </div>
         <div className="card-body">
-          {message ? <p className="rail-error">{message}</p> : <p className="empty-cell">正在读取课程…</p>}
+          {notice ? (
+            <p className={`notice notice-${notice.tone}`}>{notice.text}</p>
+          ) : (
+            <p className="empty-cell">正在读取课程…</p>
+          )}
         </div>
       </section>
     );
   }
+
+  const paused = session.state?.phase === "paused";
+  const remaining = session.state?.resume_actions?.length ?? 0;
 
   return (
     <section className="card records-card">
@@ -127,26 +171,35 @@ export function CourseDetail({ courseId, onBack }: CourseDetailProps) {
           </p>
         </div>
         <div className="card-head-actions">
-          <label className="speed-picker">
-            <span>回放速度</span>
-            <select value={String(speed)} onChange={(event) => setSpeed(Number(event.target.value))}>
-              {SPEED_OPTIONS.map((option) => (
-                <option key={option} value={String(option)}>
-                  {option}×
-                </option>
-              ))}
-            </select>
-          </label>
+          <SpeedPicker value={speed} onChange={setSpeed} disabled={session.busy} />
           <button type="button" className="btn btn-ghost" onClick={onBack}>
             返回课程列表
           </button>
-          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void replayWhole()}>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={busy || !controlsAvailable}
+            title={controlsAvailable ? undefined : "真机控制未开启"}
+            onClick={() => void replayWhole()}
+          >
             回放整套
           </button>
         </div>
       </div>
+      <div className="card-toolbar">
+        <SessionState state={session.state} />
+        <SessionButtons session={session} onError={(text) => setNotice({ tone: "bad", text })} />
+      </div>
+      {paused ? (
+        <p className="notice notice-info">
+          已暂停：机器人已动态回到接管瞬间的姿态，控制权已交还。继续播放会从当前实测姿态
+          重新规划，
+          {remaining > 0 ? `接着播 ${session.state?.resume_actions.join("、")}` : "重播这一段"}。
+        </p>
+      ) : notice ? (
+        <p className={`notice notice-${notice.tone}`}>{notice.text}</p>
+      ) : null}
       <div className="card-body">
-        {message ? <p className="rail-error">{message}</p> : null}
         <table className="course-table">
           <thead>
             <tr>
@@ -176,10 +229,20 @@ export function CourseDetail({ courseId, onBack }: CourseDetailProps) {
                   <button
                     type="button"
                     className="btn btn-ghost"
-                    disabled={busy}
+                    disabled={busy || !controlsAvailable}
+                    title={controlsAvailable ? undefined : "真机控制未开启"}
                     onClick={() => void replaySegment(segment.name)}
                   >
                     回放
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    disabled={busy || !segment.has_audio}
+                    title={segment.has_audio ? undefined : "这一段没有语音"}
+                    onClick={() => void playNarration(segment.name)}
+                  >
+                    只播放语音
                   </button>
                 </td>
               </tr>

@@ -23,6 +23,30 @@
   --amber: #ffc868;
   --red: #ff7d7d;
   --shadow: 0 18px 44px rgba(0, 0, 0, 0.42);
+  /* 主区的网格底纹。 */
+  --grid-line: rgba(107, 231, 212, 0.05);
+}
+
+/* ---------- 浅色主题 ---------- */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #e4e9f0;
+  --bg-2: #f7f9fb;
+  --panel: #ffffff;
+  --panel-strong: #f0f4f8;
+  --panel-soft: #eef1f6;
+  --line: rgba(24, 45, 74, 0.14);
+  --line-strong: rgba(24, 45, 74, 0.26);
+  --text: #101b28;
+  --muted: #46596e;
+  --muted-2: #6d8095;
+  --teal: #0d8f7c;
+  --cyan: #1d6cb0;
+  --green: #1c8c53;
+  --amber: #96650a;
+  --red: #c2353c;
+  --shadow: 0 18px 44px rgba(17, 34, 56, 0.14);
+  --grid-line: rgba(13, 143, 124, 0.07);
 }
 
 * {
@@ -90,11 +114,16 @@ button {
 
 .main {
   position: relative;
-  display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 14px;
   padding: 20px 22px;
   background: var(--bg-2);
+}
+
+/* 页头、状态条、告警条按内容高，不被挤扁；只有 .verify 吃掉剩余高度。 */
+.main > *:not(.verify) {
+  flex: 0 0 auto;
 }
 
 .main::before {
@@ -103,8 +132,8 @@ button {
   inset: 0;
   pointer-events: none;
   background-image:
-    linear-gradient(rgba(107, 231, 212, 0.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(107, 231, 212, 0.05) 1px, transparent 1px);
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
   background-size: 56px 56px;
   -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 0%, transparent 78%);
   mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 0%, transparent 78%);
@@ -236,49 +265,13 @@ button {
   color: var(--muted-2);
 }
 
-.src-age {
-  margin-left: 5px;
-  color: var(--muted-2);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
-
-.side-note {
-  margin-top: auto;
-  display: flex;
-  gap: 9px;
-  align-items: flex-start;
-  padding: 11px 12px;
-  border-radius: 9px;
-  background: var(--panel-strong);
-  border: 1px solid var(--line);
-}
-
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-top: 5px;
-  flex: 0 0 auto;
-}
-
-.side-note strong {
-  display: block;
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.side-note small {
-  color: var(--muted);
-  font-size: 11px;
-}
-
 /* ---------- 主内容 ---------- */
 .main-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 18px;
+  flex-wrap: wrap;
 }
 
 .eyebrow {
@@ -288,12 +281,14 @@ button {
   letter-spacing: 0.16em;
   text-transform: uppercase;
   margin-bottom: 6px;
+  white-space: nowrap;
 }
 
 .main-head h1 {
   font-size: 21px;
   letter-spacing: -0.02em;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .mode-badge {
@@ -416,10 +411,13 @@ button {
 }
 
 /* ---------- 状态核验区 ---------- */
+/* 一行固定到容器高度：右侧关节表展开/收起都不再改变左边 3D 卡片的尺寸。 */
 .verify {
   display: grid;
   grid-template-columns: minmax(0, 1.02fr) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: 14px;
+  flex: 1 1 auto;
   min-height: 0;
 }
 
@@ -427,6 +425,59 @@ button {
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* 左列上下分：3D 姿态和深度相机各占一半。 */
+.verify-left {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  min-height: 0;
+}
+
+.verify-left > * {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 关节面板外面包了一层 div，卡片得跟着一起撑满，两列高度才对得齐。 */
+#joint-panel > .card {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* ---------- 深度相机 ---------- */
+.camera-view {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: #060c14;
+}
+
+.camera-view img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.camera-empty {
+  padding: 18px;
+  color: var(--muted-2);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+/* 放大：铺满整屏，ESC 或「缩小」回到原来的半格。 */
+.camera-card.expanded {
+  position: fixed;
+  inset: 20px;
+  z-index: 55;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
 }
 
 .card {
@@ -459,6 +510,11 @@ button {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+/* 卡片头里的按钮跟着内容走宽，和速度下拉排成整齐的一排。 */
+.card-head-actions .btn {
+  width: auto;
 }
 
 .meta {
@@ -557,18 +613,31 @@ button {
   width: 22px;
   height: 12px;
   border-radius: 999px;
-  background: rgba(107, 231, 212, 0.32);
+  background: rgba(154, 177, 203, 0.22);
   position: relative;
+  flex: 0 0 auto;
+  transition: background 0.15s ease;
 }
 
 .toggle .sw::after {
   content: "";
   position: absolute;
   top: 2px;
-  right: 2px;
+  left: 2px;
   width: 8px;
   height: 8px;
   border-radius: 50%;
+  background: var(--muted-2);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+/* 开关必须看得出当前状态：关的时候旋钮在左、轨道是灰的。 */
+.toggle[aria-pressed="true"] .sw {
+  background: rgba(107, 231, 212, 0.32);
+}
+
+.toggle[aria-pressed="true"] .sw::after {
+  transform: translateX(10px);
   background: var(--teal);
 }
 
@@ -753,57 +822,6 @@ button {
   opacity: 0.5;
 }
 
-.act-list {
-  display: grid;
-  gap: 6px;
-}
-
-.act-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 4px 8px;
-  align-items: center;
-  padding: 8px 10px;
-  border-radius: 9px;
-  border: 1px solid var(--line);
-  background: var(--panel-soft);
-}
-
-.act-row.selected {
-  border-color: rgba(107, 231, 212, 0.5);
-  background: rgba(107, 231, 212, 0.08);
-}
-
-.act-pick {
-  display: grid;
-  gap: 1px;
-  background: none;
-  border: 0;
-  padding: 0;
-  text-align: left;
-  cursor: pointer;
-  color: inherit;
-  min-width: 0;
-}
-
-.act-pick strong {
-  font-size: 12px;
-  font-weight: 650;
-  color: var(--text);
-}
-
-.act-meta {
-  color: var(--muted-2);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
-
-.act-tags {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .tag {
   font-size: 10px;
   font-weight: 700;
@@ -812,26 +830,6 @@ button {
 
 .tag.teal {
   color: var(--teal);
-}
-
-.link-button {
-  background: none;
-  border: 0;
-  padding: 0;
-  color: var(--muted);
-  font-size: 11px;
-  cursor: pointer;
-  text-decoration: underline;
-}
-
-.link-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-
-.act-tags a {
-  color: var(--cyan);
-  font-size: 11px;
 }
 
 .btn {
@@ -862,77 +860,15 @@ button {
   color: var(--muted);
 }
 
+/* 危险操作：形状和别的按钮一样，只把字染成红色。 */
+.btn-danger {
+  color: var(--red);
+}
+
 .btn:disabled {
   cursor: not-allowed;
   opacity: 0.5;
   box-shadow: none;
-}
-
-.rail-flags {
-  display: grid;
-  gap: 5px;
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.rail-flags div {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.rail-flags b {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.rail-details summary {
-  cursor: pointer;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.action-import {
-  display: grid;
-  gap: 6px;
-  margin-top: 8px;
-}
-
-.action-import label {
-  color: var(--muted-2);
-  font-size: 11px;
-}
-
-.action-import input,
-.action-import textarea {
-  width: 100%;
-  padding: 7px 9px;
-  border-radius: 8px;
-  border: 1px solid var(--line-strong);
-  background: var(--bg-2);
-  color: var(--text);
-  font: inherit;
-  font-size: 12px;
-}
-
-.action-import textarea {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  resize: vertical;
-}
-
-.action-import button {
-  padding: 7px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--line-strong);
-  background: var(--panel-soft);
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.action-import button:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
 }
 
 .control-list {
@@ -1018,39 +954,134 @@ button {
   cursor: pointer;
 }
 
-/* ---------- 速度下拉 ---------- */
+/* ---------- 速度下拉（和旁边的按钮同一排、同一高度） ---------- */
 .speed-picker {
-  display: flex;
+  position: relative;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 7px 10px;
+  gap: 8px;
+  flex: 0 0 auto;
+  height: 40px;
+  padding: 0 6px 0 12px;
   border-radius: 9px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   background: var(--panel-soft);
+  color: var(--muted-2);
   font-size: 12px;
-  color: var(--muted);
+  white-space: nowrap;
 }
 
-.speed-picker select {
-  padding: 4px 8px;
+.speed-picker-label {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+.speed-picker-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 8px 0 10px;
+  border: 0;
   border-radius: 7px;
-  border: 1px solid var(--line-strong);
-  background: var(--bg-2);
+  background: transparent;
   color: var(--text);
   font: inherit;
   font-size: 12px;
+  font-weight: 650;
   font-variant-numeric: tabular-nums;
+  cursor: pointer;
 }
 
-.speed-picker select:disabled {
+.speed-picker-button:hover:not(:disabled) {
+  background: rgba(154, 177, 203, 0.12);
+}
+
+.speed-picker-button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
 }
 
+.speed-picker-caret {
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--muted-2);
+}
+
+/* 自己画的下拉展开层：不用浏览器原生的 select 列表。 */
+.speed-picker-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  min-width: 92px;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  background: var(--panel-strong);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.45);
+}
+
+.speed-picker-option {
+  padding: 7px 10px;
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.speed-picker-option:hover {
+  background: rgba(154, 177, 203, 0.12);
+  color: var(--text);
+}
+
+.speed-picker-option.selected {
+  background: rgba(107, 231, 212, 0.14);
+  color: var(--teal);
+}
+
+.speed-picker-option:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: -2px;
+}
+
 /* ---------- 执行轨迹记录 ---------- */
-.main-records {
-  grid-template-rows: auto minmax(0, 1fr);
+.main-records .records-card,
+.main-records .record-detail {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* 记录列表的行距比关节表松一档，八列并排才不至于挤成一团。 */
+.jt .records-table {
+  font-size: 12px;
+}
+
+.jt .records-table th,
+.jt .records-table td {
+  padding: 12px 14px;
+}
+
+.jt .records-table th:nth-child(2),
+.jt .records-table td:nth-child(2),
+.jt .records-table .col-name {
+  text-align: left;
+}
+
+.jt .records-table .col-action {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.jt .records-table .col-action .btn {
+  width: auto;
+  min-height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
 }
 
 .records-card,
@@ -1178,9 +1209,12 @@ button {
   .nav-item {
     width: auto;
   }
-  .side-note {
+  .theme-switcher {
     margin-top: 0;
-    flex: 0 0 auto;
+  }
+  .theme-menu {
+    bottom: auto;
+    top: calc(100% + 8px);
   }
   .rail {
     border-left: 0;
@@ -1188,10 +1222,17 @@ button {
   }
   .verify {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+  }
+  .verify-left {
+    grid-template-rows: auto auto;
   }
   .pose-canvas {
     height: 420px;
     flex: none;
+  }
+  .camera-view {
+    min-height: 320px;
   }
 }
 
@@ -1260,6 +1301,290 @@ button {
   align-items: center;
   gap: 8px;
   white-space: nowrap;
+}
+
+/* 表格里的操作按钮：跟着内容走宽，不占满整列。 */
+.course-actions .btn {
+  width: auto;
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+/* ---- 课程页的工具条：会话状态 + 暂停/继续/停止 ---- */
+.card-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-soft);
+}
+
+.session-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.session-state strong {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.session-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--muted-2);
+  box-shadow: 0 0 0 3px rgba(130, 152, 174, 0.14);
+}
+
+.session-dot.phase-playing,
+.session-dot.phase-acquiring,
+.session-dot.phase-planning {
+  background: var(--teal);
+  box-shadow: 0 0 0 3px rgba(107, 231, 212, 0.16);
+}
+
+.session-dot.phase-paused {
+  background: var(--amber);
+  box-shadow: 0 0 0 3px rgba(255, 200, 104, 0.16);
+}
+
+.session-dot.phase-fault {
+  background: var(--red);
+  box-shadow: 0 0 0 3px rgba(255, 125, 125, 0.16);
+}
+
+.session-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.session-buttons .btn {
+  width: auto;
+  min-height: 30px;
+  padding: 0 14px;
+  font-size: 12px;
+}
+
+/* ---- 页面提示：说明是青色，出错是红色，不再用报错色显示成功消息 ---- */
+.notice {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.notice-info {
+  border-color: rgba(107, 231, 212, 0.3);
+  border-left-color: var(--teal);
+  background: rgba(107, 231, 212, 0.07);
+  color: #cdf6ef;
+}
+
+.notice-bad {
+  border-color: rgba(255, 125, 125, 0.3);
+  border-left-color: var(--red);
+  background: rgba(255, 125, 125, 0.07);
+  color: #ffd7d7;
+}
+
+/* ---- 确认弹窗（替掉浏览器原生的 window.confirm） ---- */
+.confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(4, 8, 14, 0.72);
+  backdrop-filter: blur(3px);
+  animation: confirm-fade 0.12s ease-out;
+}
+
+.confirm-panel {
+  width: 100%;
+  max-width: 460px;
+  padding: 20px 22px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--line-strong);
+  background: var(--panel-strong);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  animation: confirm-pop 0.14s ease-out;
+}
+
+.confirm-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 10px;
+}
+
+.confirm-message {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.confirm-actions .btn {
+  width: auto;
+  min-height: 36px;
+  padding: 0 20px;
+  font-size: 13px;
+}
+
+.confirm-accept {
+  background: linear-gradient(180deg, #3ad3b0, #229c81);
+  border-color: rgba(107, 231, 212, 0.5);
+  color: #04231c;
+  box-shadow: 0 8px 20px rgba(35, 161, 132, 0.3);
+}
+
+.confirm-accept.is-danger {
+  background: linear-gradient(180deg, #ff9a9a, #d94848);
+  border-color: rgba(255, 125, 125, 0.5);
+  color: #2b0d0d;
+  box-shadow: 0 8px 20px rgba(217, 72, 72, 0.3);
+}
+
+@keyframes confirm-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes confirm-pop {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+/* ---- 浅色主题里要单独压深的几处 ---- */
+:root[data-theme="light"] .jt td.num {
+  color: #1d2c3d;
+}
+
+:root[data-theme="light"] .notice-info {
+  color: #0b6b5c;
+}
+
+:root[data-theme="light"] .notice-bad {
+  color: #a12a30;
+}
+
+:root[data-theme="light"] .btn-primary {
+  color: #04231c;
+}
+
+:root[data-theme="light"] .tbadge {
+  background: var(--panel-strong);
+}
+
+/* ---- 左下角的外观切换 ---- */
+.theme-switcher {
+  position: relative;
+  margin-top: auto;
+}
+
+.theme-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.theme-button:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+.theme-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 40;
+  min-width: 168px;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  background: var(--panel-strong);
+  box-shadow: var(--shadow);
+}
+
+.theme-menu-title {
+  padding: 2px 8px 6px;
+  color: var(--muted-2);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.theme-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.theme-menu-item:hover {
+  background: rgba(154, 177, 203, 0.14);
+  color: var(--text);
+}
+
+.theme-menu-item[aria-checked="true"] {
+  color: var(--text);
+}
+
+.theme-menu-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: transparent;
+  flex: 0 0 auto;
+}
+
+.theme-menu-item[aria-checked="true"] .theme-menu-dot {
+  background: var(--teal);
 }
 
 @media (prefers-reduced-motion: reduce) {
