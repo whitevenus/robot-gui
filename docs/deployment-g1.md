@@ -686,29 +686,49 @@ tau = -qfrc_bias[upper_dof]      # qfrc_bias 在 v=0 时只剩重力项
 支持 multipart 推流，不用前端轮询）。取不到就如实写原因，页面显示「不可用」，
 不拿别的东西凑画面。
 
-**取流通道还没在真机上定死。** 目前默认走 SDK2 的 videohub RPC
-（`VideoClient.GetImageSample`，Go2 / B2 相机例程用的就是它），但 G1 头部的
-深度相机在公开的 SDK2 / unitree_ros2 仓库里都没有例程，实际是哪条路通要实测。
+**取流通道（2026-10-22 探针实测定的）**：`tools/probe_depth_camera.py` 在
+`.165` 上的结果——
 
-先在机器人上跑探针（只读，不动机器人）：
+| 通道 | 结果 |
+|---|---|
+| SDK2 videohub RPC（`GetImageSample`） | **不通**，返回 3102、没有数据 |
+| `pyrealsense2` / `pyorbbec` | 都没装 |
+| **V4L2 `/dev/video*`** | **通**：`video0` 256×144、`video2` 424×240、`video4` 320×180 |
+| 本地推流端口 8554 / 554 | 没人听 |
 
-```bash
-cd /usr/local/src/robot-gui
-backend/.venv/bin/python tools/probe_depth_camera.py
-```
+所以走 **V4L2 + OpenCV**：默认自动挑**分辨率最高**的那路（现在是 424×240），
+要指定设备就设 `ROBOT_GUI_DEPTH_CAMERA_DEVICE=/dev/video2`。三个偶数号设备
+都是 16:9，估计是同一个头部相机在不同分辨率下的输出节点（奇数号是配对的
+元数据节点，读不出帧）。**哪一路真是头部相机，看一眼画面就知道**——探针把
+三张图存在机器人上的 `/tmp/depth_camera_probe/`。
 
-它会依次试：videohub RPC、`/dev/video*`（V4L2）、相机厂商 SDK（`pyrealsense2` /
-`pyorbbec`）、以及本地常见推流端口，结果和取到的图片都放在
-`/tmp/depth_camera_probe`。按输出定死取流路径后，改 `camera.py` 里的
-`VideoHubGrabber` 即可。
-
-> 注意：取流是**读** RPC，留在后端进程里没问题（和遥测的 FSM 回读一样）。
+> 注意：取流是**读**帧，留在后端进程里没问题（和遥测的 FSM 回读一样）。
 > 之前音频推流要挪到子进程，是因为推流时控制回路把 DDS 通道占满了，那是写方向
 > 的问题。
 
 ---
 
-## 10. 验证记录
+## 10. 只播讲解语音
+
+`POST /api/v1/control/audio`：只推 PCM，**不接管控制权也不下发任何关节指令**，
+机器人一动不动。单段传 `{"name": "p1_s2"}`，整套传 `{"course": "<课程 id>"}`
+（`true` 指默认课）。段与段之间按整套回放同一条时间线补静音，听感一致。
+
+只播语音也是一个**会话**（`robot_gui/narration.py`），状态并进
+`/api/v1/control/state` 的 `narration` 字段，页面上的暂停/继续/停止只有一套，
+谁在跑就归谁管：
+
+- **暂停**：停在段边界，被打断的那一段不重播；机器人不用动（回放暂停是先把
+  机器人带回接管姿态再交权，只播语音没这回事）
+- **继续**：接着播下一段
+- **停止**：立刻停声
+
+回放会话和语音会话互斥：回放还在跑时播语音会被拒（`control_busy`），反之
+亦然——两者共用扬声器，音频端口有闩锁。
+
+---
+
+## 11. 验证记录
 
 | 项目 | 范围 | 状态 |
 |---|---|---|

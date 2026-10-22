@@ -1,22 +1,24 @@
 """G1 深度相机取流。
 
-G1 头部的相机不通过遥测话题过来，官方给的是**取一帧图片**的 RPC：videohub
-服务的 `GetImageSample`（Go2 / B2 的相机例程用的就是它）。这里在后台线程里
-按固定间隔取帧，把最新的 JPEG 缓存起来，供网页端做 MJPEG 推流。
+G1 头部的相机在机器上就是一个 V4L2 设备（`/dev/video*`），不经过遥测话题，
+也没有装厂商 SDK。后台线程按固定间隔取帧、缓存最新的 JPEG，供网页端做 MJPEG
+推流。
 
-**取不到就如实说取不到**：机器上服务没起、没权限、或者这台机器没装相机，
+**取不到就如实说取不到**：设备打不开、读不出帧、或者这台机器没装相机，
 `state()` 里会写明原因，页面照实显示，不用别的画面凑数。
 
-取流通道的取舍：**读** RPC 留在本进程（和遥测的 FSM 回读一样，能拿到回包）；
-之前音频推流之所以要挪到子进程，是因为推流时控制回路把 DDS 通道占满了，
-那是写方向的问题，跟这里不一样。
+取流通道的取舍：读帧留在本进程（和遥测的 FSM 回读一样）。之前音频推流要挪到
+子进程，是因为推流时控制回路把 DDS 通道占满了，那是写方向的问题，跟这里
+不一样。
 """
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -33,39 +35,108 @@ class CameraError(RuntimeError):
         self.code = code
 
 
-class VideoHubGrabber:
-    """SDK2 videohub RPC 取帧。
+class V4l2Grabber:
+    """从 V4L2 设备取帧（G1 头部的相机在机器上就是 /dev/video*）。
 
-    `VideoClient` 走的是 SDK2 的通用 RPC 通道（服务名 `videohub`，接口 1001
-    `GetImageSample`），返回的就是一帧 JPEG。
+    2026-10-22 真机实测（`tools/probe_depth_camera.py`）：**videohub RPC 不通**
+    （返回 3102），`pyrealsense2` / `pyorbbec` 都没装，但 `/dev/video0`、`/dev/video2`、
+    `/dev/video4` 能读到 16:9 的画面（256×144 / 424×240 / 320×180）——这三个是同一个
+    头部相机在不同分辨率下的输出节点，偶数号能读，奇数号是配对的元数据节点。
+
+    所以默认走 V4L2 + OpenCV：**分辨率最高的那个设备**优先。哪一路真是头部相机，
+    看一眼画面就知道；要指定设备就设 `ROBOT_GUI_DEPTH_CAMERA_DEVICE`。
     """
 
-    def __init__(self, timeout_s: float = 2.0) -> None:
-        self._timeout_s = timeout_s
-        self._client: Any = None
+    def __init__(self, device: str) -> None:
+        self._device = device
+        self._capture: Any = None
+        self._width = 0
+        self._height = 0
+
+    @property
+    def device(self) -> str:
+        return self._device
+
+    @property
+    def size(self) -> tuple[int, int]:
+        return self._width, self._height
+
+    def describe(self) -> str:
+        return f"{self._device}（{self._width}×{self._height}）"
 
     def open(self) -> None:
-        from unitree_sdk2py.go2.video.video_client import VideoClient
-
-        client = VideoClient()
-        client.SetTimeout(self._timeout_s)
-        client.Init()
-        self._client = client
+        try:
+            import cv2  # noqa: PLC0415 - 按需导入，没装就报清楚
+        except ImportError as error:
+            raise CameraError(
+                "camera.opencv_missing",
+                f"没有 OpenCV，取不了相机画面：{error}",
+            ) from error
+        capture = cv2.VideoCapture(self._device, cv2.CAP_V4L2)
+        if not capture.isOpened():
+            capture.release()
+            raise CameraError(
+                "camera.device_unavailable",
+                f"打不开相机设备 {self._device}。",
+            )
+        self._capture = capture
+        self._width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self._height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     def close(self) -> None:
-        self._client = None
+        if self._capture is not None:
+            self._capture.release()
+            self._capture = None
 
     def grab(self) -> bytes:
-        if self._client is None:
-            raise CameraError("camera.client_missing", "videohub 通道没有建立。")
-        code, data = self._client.GetImageSample()
-        if code != 0:
+        if self._capture is None:
+            raise CameraError("camera.client_missing", "相机设备没有打开。")
+        import cv2  # noqa: PLC0415 - 同上
+
+        ok, frame = self._capture.read()
+        if not ok or frame is None:
+            raise CameraError("camera.grab_failed", f"{self._device} 读不出帧。")
+        encoded, buffer = cv2.imencode(".jpg", frame)
+        if not encoded:
+            raise CameraError("camera.encode_failed", "这一帧编码成 JPEG 失败。")
+        return bytes(buffer)
+
+    @staticmethod
+    def pick() -> str:
+        """挑一个能用的设备：能读到画面、且分辨率最高的那个。"""
+        try:
+            import cv2  # noqa: PLC0415 - 按需导入
+        except ImportError:
+            return "/dev/video0"
+        best_device = ""
+        best_pixels = 0
+        for path in sorted(Path("/dev").glob("video*")):
+            capture = cv2.VideoCapture(str(path), cv2.CAP_V4L2)
+            if not capture.isOpened():
+                capture.release()
+                continue
+            ok, frame = capture.read()
+            capture.release()
+            if not ok or frame is None:
+                continue
+            pixels = int(frame.shape[1]) * int(frame.shape[0])
+            if pixels > best_pixels:
+                best_pixels = pixels
+                best_device = str(path)
+        if not best_device:
             raise CameraError(
-                "camera.grab_failed", f"GetImageSample 返回错误码 {code}。"
+                "camera.no_device",
+                "机器上没有一个能读出画面的 /dev/video* 设备。",
             )
-        if not data:
-            raise CameraError("camera.empty_frame", "取到的这一帧是空的。")
-        return bytes(data)
+        return best_device
+
+
+def default_grabber_factory() -> Any:
+    """默认取帧器：配置指定的设备优先，否则自动挑一个分辨率最高的。"""
+    device = os.getenv("ROBOT_GUI_DEPTH_CAMERA_DEVICE", "").strip()
+    if device:
+        return V4l2Grabber(device)
+    return V4l2Grabber(V4l2Grabber.pick())
 
 
 class DepthCamera:
@@ -80,13 +151,14 @@ class DepthCamera:
         grabber_factory: Callable[[], Any] | None = None,
         poll_interval_s: float = 0.2,
     ) -> None:
-        self._grabber_factory = grabber_factory or VideoHubGrabber
+        self._grabber_factory = grabber_factory or default_grabber_factory
         self._poll_interval_s = poll_interval_s
         self._grabber: Any = None
         self._frame: bytes | None = None
         self._frame_at: float | None = None
         self._error_code = ""
         self._error_message = ""
+        self._source = ""
         self._frames = 0
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -126,6 +198,7 @@ class DepthCamera:
                 "available": self._frame is not None,
                 "error_code": self._error_code,
                 "error_message": self._error_message,
+                "source": self._source,
                 "frames": self._frames,
                 "frame_age_s": round(age, 3) if age is not None else None,
             }
@@ -136,6 +209,7 @@ class DepthCamera:
         try:
             self._grabber = self._grabber_factory()
             self._grabber.open()
+            self._set_source()
         except Exception as error:  # noqa: BLE001 - 起不来就记原因，等下一轮
             self._record_error(
                 "camera.unavailable",
@@ -151,6 +225,7 @@ class DepthCamera:
                 try:
                     self._grabber = self._grabber_factory()
                     self._grabber.open()
+                    self._set_source()
                     self._clear_error()
                 except Exception as error:  # noqa: BLE001 - 继续等
                     self._record_error(
@@ -189,3 +264,11 @@ class DepthCamera:
         with self._lock:
             self._error_code = ""
             self._error_message = ""
+
+    def _set_source(self) -> None:
+        """记下画面来自哪儿（设备号和分辨率），页面要显示。"""
+        describe = getattr(self._grabber, "describe", None)
+        if describe is None:
+            return
+        with self._lock:
+            self._source = str(describe())

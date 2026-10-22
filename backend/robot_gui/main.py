@@ -5,7 +5,6 @@ import json
 import os
 import sys
 import tempfile
-import threading
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -28,7 +27,7 @@ from starlette.responses import StreamingResponse
 
 from .actions import ActionStore, ActionStoreError
 from .adapters import TelemetryAdapter, UnitreeSdkTelemetryAdapter
-from .audio import AudioPusher, G1AudioPort, pcm_duration_s
+from .audio import AudioPusher, G1AudioPort
 from .camera import DepthCamera
 from .control import (
     ControlError,
@@ -41,6 +40,7 @@ from .course_import import MAX_PACKAGE_BYTES, CourseImportError, import_course
 from .courses import DEFAULT_COURSE_ID, CourseStore, CourseStoreError
 from .fsm import FsmError, FsmService, FsmSettings
 from .gravity import GravityFeedforward, default_model_path
+from .narration import NarrationError, NarrationSession
 from .records import RecordStore, RecordStoreError
 from .sdk_runtime import describe_crc_status, ensure_crc_libraries
 from .telemetry import TelemetryHub
@@ -209,6 +209,7 @@ def create_app(
         runtime_settings.records_dir or (PROJECT_ROOT / "logs" / "records")
     )
     depth_camera = camera or DepthCamera()
+    narration = NarrationSession(audio_port)
     control = ControlService(
         settings=ControlSettings(
             interface=runtime_settings.dds_interface or "",
@@ -265,6 +266,7 @@ def create_app(
             yield
         finally:
             control.release()
+            narration.stop()
             if audio_port is not None:
                 audio_port.stop()
             depth_camera.stop()
@@ -439,7 +441,14 @@ def create_app(
 
     @app.get("/api/v1/control/state")
     async def control_state() -> dict[str, Any]:
-        return control.state()
+        """控制会话状态。
+
+        `narration` 是**只播讲解语音**那一类会话（机器人不动）：页面上只有一套
+        暂停/继续/停止，谁在跑就归谁管。
+        """
+        state = control.state()
+        state["narration"] = narration.state()
+        return state
 
     @app.post("/api/v1/control/replay")
     async def replay(payload: dict[str, Any]) -> dict[str, Any]:
@@ -506,7 +515,12 @@ def create_app(
 
     @app.post("/api/v1/control/pause")
     async def pause() -> dict[str, Any]:
-        """暂停当前回放：停语音、平滑交还控制权，并记住续播的位置。"""
+        """暂停当前会话：回放是停语音并交还控制权，只播语音是停在段边界。"""
+        if narration.active:
+            try:
+                return narration.pause()
+            except NarrationError as error:
+                raise _error(error.code, str(error)) from error
         try:
             return await asyncio.to_thread(control.pause)
         except ControlError as error:
@@ -514,7 +528,12 @@ def create_app(
 
     @app.post("/api/v1/control/resume")
     async def resume() -> dict[str, Any]:
-        """从暂停处继续：按当前实测姿态重新规划，只播还没播完的那几段。"""
+        """从暂停处继续：回放按当前实测姿态重新规划，只播语音接着播下一段。"""
+        if narration.active:
+            try:
+                return narration.resume()
+            except NarrationError as error:
+                raise _error(error.code, str(error)) from error
         try:
             return await asyncio.to_thread(control.resume)
         except ControlError as error:
@@ -522,6 +541,9 @@ def create_app(
 
     @app.post("/api/v1/control/release")
     async def release() -> dict[str, Any]:
+        """停止当前会话：回放交还控制权，只播语音就只是停声。"""
+        if narration.active:
+            return narration.stop()
         return control.release()
 
     @app.post("/api/v1/control/audio")
@@ -532,7 +554,8 @@ def create_app(
         - `{"course": "<课程 id>"}`：按课程顺序放整套讲解
 
         语音走的是回放时同一条推流路径（PCM → 独立子进程 → 扬声器），所以听到的
-        就是回放时的效果，只是这次机器人一动不动。
+        就是回放时的效果，只是这次机器人一动不动。段与段之间按同一条时间线补
+        静音，听感和整套回放一致。
         """
         if audio_port is None:
             raise _error(
@@ -540,11 +563,8 @@ def create_app(
                 "语音推流未开启：设 ROBOT_GUI_AUDIO_ENABLED=1 后重启后端。",
                 status=409,
             )
-        if audio_port.playing:
-            raise _error(
-                "audio_already_playing", "正在播语音，请等它播完再试。", status=409
-            )
-        port = audio_port
+        if control.state()["phase"] not in ("idle", "fault"):
+            raise _error("control_busy", "回放还在进行，先停掉再播语音。", status=409)
         course_id = payload.get("course")
         name = payload.get("name")
         if course_id is True:
@@ -554,33 +574,27 @@ def create_app(
                 record = courses.read(course_id)
             except CourseStoreError as error:
                 raise _error(error.code, str(error), status=404) from error
-            clips = _narration_clips(
-                store,
+            schedule = _narration_schedule(
                 [(item.name, item.duration_s) for item in record.segments],
                 runtime_settings.transition_seconds,
             )
         elif isinstance(name, str) and name:
             pcm = _read_audio(store, name, required=True)
-            clips = [(0.0, pcm)] if pcm is not None else []
+            schedule = [(name, 0.0)] if pcm is not None else []
         else:
             raise _error(
                 "audio_target_required",
                 "要给出动作名 name 或课程 id course。",
                 status=400,
             )
+        clips = {item: store.read_audio(item) for item, _ in schedule}
+        clips = {item: pcm for item, pcm in clips.items() if pcm is not None}
         if not clips:
             raise _error("audio_not_found", "找不到对应的讲解语音。", status=404)
-
-        def worker() -> None:
-            error = port.play(clips, threading.Event())
-            if error:
-                logger.warning("只播讲解语音失败（{}）", error)
-
-        threading.Thread(target=worker, name="robot-gui-narration", daemon=True).start()
-        return {
-            "clips": len(clips),
-            "duration_s": round(max(at + pcm_duration_s(pcm) for at, pcm in clips), 2),
-        }
+        try:
+            return narration.start(schedule, clips)
+        except NarrationError as error:
+            raise _error(error.code, str(error)) from error
 
     # ---- 深度相机 ----
 
@@ -689,24 +703,21 @@ def create_app(
     return app
 
 
-def _narration_clips(
-    store: ActionStore,
+def _narration_schedule(
     segments: Sequence[tuple[str, float]],
     transition: float,
-) -> list[tuple[float, bytes]]:
-    """只播讲解时的推流时刻表：(起始秒数, PCM)。
+) -> list[tuple[str, float]]:
+    """只播讲解时各段的起始时刻。
 
-    和 tools/play_audio.py 同一套拼法：每段讲解之间留一段衔接的静音，
-    听起来和整套回放时一致。
+    和 tools/play_audio.py、整套回放同一套拼法：每段之间留一段衔接的静音，
+    听起来和整套回放时一致。返回 (动作名, 起始秒数)。
     """
-    clips: list[tuple[float, bytes]] = []
+    schedule: list[tuple[str, float]] = []
     at = transition
     for name, duration in segments:
-        pcm = store.read_audio(name)
-        if pcm is not None:
-            clips.append((at, pcm))
+        schedule.append((name, at))
         at += duration + transition
-    return clips
+    return schedule
 
 
 def _read_audio(store: ActionStore, name: str, required: bool = False) -> bytes | None:
