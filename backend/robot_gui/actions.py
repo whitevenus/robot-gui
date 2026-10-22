@@ -230,3 +230,6 @@ class ActionStore:
         if not path.is_file():
             raise ActionStoreError("action_not_found", f"动作 {name} 不存在。")
         path.unlink()
+        # 讲解语音是按动作名存的（<name>.pcm）：动作没了语音留着就是孤儿，
+        # 重新导入同名动作时会撞上 audio_conflict。
+        (path.parent / AUDIO_DIR_NAME / f"{name}.pcm").unlink(missing_ok=True)
