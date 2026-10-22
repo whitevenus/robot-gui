@@ -421,6 +421,60 @@ describe("Real telemetry workstation", () => {
     );
   });
 
+  it("opens the course manager from the navigation", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const course = {
+      id: "course-1",
+      name: "第一课",
+      actions: ["seg-a"],
+      segments: [
+        { name: "seg-a", text: "第一段讲解", duration_s: 11.9, frames: 357, has_audio: true },
+      ],
+      duration_s: 11.9,
+      created_at: "2026-10-22T12:00:00+00:00",
+      source: { kind: "courseware-v3" },
+    };
+    stubFetch({
+      "/api/v1/actions": { actions: [] },
+      "/api/v1/control/state": {
+        phase: "idle",
+        message: "",
+        action: "",
+        error_code: "",
+        available: false,
+        trajectory_duration_s: 0,
+        audio_playing: false,
+        gravity_compensation: false,
+        default_speed: 1,
+        current_speed: 1,
+        resume_actions: [],
+      },
+      "/api/v1/fsm/state": {
+        available: true,
+        reason: "",
+        current: { id: null, name: "" },
+        whitelist: [501],
+        modes: FSM_MODES,
+      },
+      "/api/v1/courses/course-1": course,
+      "/api/v1/courses": { courses: [course] },
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      screen.getByRole("button", { name: /课程管理/ }).click();
+    });
+
+    expect(await screen.findByText("第一课")).toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByText("详情").click();
+    });
+
+    expect(await screen.findByText("第一段讲解")).toBeInTheDocument();
+  });
+
   it("shows the real SDK2/DDS source and connection state", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<App />);

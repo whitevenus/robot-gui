@@ -4,12 +4,22 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
@@ -23,6 +33,8 @@ from .control import (
     load_gains,
     measured_pose_provider,
 )
+from .course_import import MAX_PACKAGE_BYTES, CourseImportError, import_course
+from .courses import CourseStore, CourseStoreError
 from .fsm import FsmError, FsmService, FsmSettings
 from .gravity import GravityFeedforward, default_model_path
 from .records import RecordStore, RecordStoreError
@@ -177,6 +189,7 @@ def create_app(
         secondary_imu_topic=runtime_settings.secondary_imu_topic,
     )
     store = ActionStore(runtime_settings.data_dir)
+    courses = CourseStore(runtime_settings.data_dir, actions=store)
     audio_port = (
         G1AudioPort(runtime_settings.audio_app_name, pusher=audio_pusher)
         if audio_pusher is not None or runtime_settings.audio_enabled
@@ -264,6 +277,7 @@ def create_app(
     app.state.telemetry_hub = hub
     app.state.telemetry_adapter = adapter
     app.state.action_store = store
+    app.state.course_store = courses
     app.state.control = control
     app.state.records = records
 
@@ -339,6 +353,79 @@ def create_app(
             raise _error(error.code, str(error), status=404) from error
         return {"deleted": name}
 
+    # ---- 课程库 ----
+
+    @app.get("/api/v1/courses")
+    async def list_courses() -> dict[str, Any]:
+        """课程列表：默认课（data/course.json）在最前，其余是导入的课。"""
+        try:
+            records = courses.list()
+        except CourseStoreError as error:
+            raise _error(error.code, str(error)) from error
+        return {"courses": [record.as_dict() for record in records]}
+
+    @app.get("/api/v1/courses/{course_id}")
+    async def read_course(course_id: str) -> dict[str, Any]:
+        try:
+            return courses.read(course_id).as_dict()
+        except CourseStoreError as error:
+            raise _error(error.code, str(error), status=404) from error
+
+    @app.delete("/api/v1/courses/{course_id}")
+    async def delete_course(course_id: str) -> dict[str, Any]:
+        """删课程记录；动作库是共享的，不动。"""
+        try:
+            courses.delete(course_id)
+        except CourseStoreError as error:
+            status = 409 if error.code == "course_protected" else 404
+            raise _error(error.code, str(error), status=status) from error
+        return {"course_id": course_id, "deleted": True}
+
+    @app.post("/api/v1/courses/import", status_code=201)
+    async def import_course_package(
+        # File()/Form() 放在默认值里是 FastAPI 声明上传接口的标准写法。
+        file: UploadFile = File(...),  # noqa: B008
+        name: str | None = Form(default=None),  # noqa: B008
+    ) -> dict[str, Any]:
+        """导入一个 courseware-v3 课程包。
+
+        导入是事务性的：动作、语音、课程清单要么都写成功，要么都不写。
+        """
+        data_dir = runtime_settings.data_dir
+        if data_dir is None:
+            raise _error(
+                "action_store_not_configured", "未配置 ROBOT_GUI_DATA_DIR。", status=503
+            )
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as handle:
+            temp_path = Path(handle.name)
+            written = 0
+            try:
+                # 上传内容边收边写，不整个读进内存。
+                while chunk := await file.read(1 << 20):
+                    written += len(chunk)
+                    if written > MAX_PACKAGE_BYTES:
+                        raise _error(
+                            "package_too_large",
+                            f"课程包超过 {MAX_PACKAGE_BYTES} 字节的上限。",
+                            status=413,
+                        )
+                    handle.write(chunk)
+            except Exception:
+                temp_path.unlink(missing_ok=True)
+                raise
+        try:
+            course_name = name or Path(file.filename or "course").stem
+            record = import_course(temp_path, store, courses, name=course_name)
+        except CourseImportError as error:
+            raise _error(error.code, str(error), status=400) from error
+        except CourseStoreError as error:
+            raise _error(error.code, str(error)) from error
+        except ActionStoreError as error:
+            raise _error(error.code, str(error)) from error
+        finally:
+            temp_path.unlink(missing_ok=True)
+        return {"course": record.as_dict()}
+
     # ---- 真机控制 ----
 
     @app.get("/api/v1/control/state")
@@ -350,7 +437,8 @@ def create_app(
         """回放一个动作，或课程清单里的**一整套**。
 
         - `{"action": "p1_s2"}`：单个动作（调试用）
-        - `{"course": true}`：按 `data/course.json` 的顺序播整套
+        - `{"course": true}`：按 `data/course.json` 的顺序播整套（默认课）
+        - `{"course": "a1b2c3"}`：按指定课程 id 播整套
         - `{"speed": 0.8}`：这一把的速度倍率（页面上的下拉），可选
 
         整套是一条连续轨迹：动作之间是规划出来的衔接段，讲解语音按每个动作在
@@ -364,12 +452,20 @@ def create_app(
             isinstance(speed, bool) or not isinstance(speed, (int, float))
         ):
             raise _error("replay_speed_invalid", "speed 必须是数字。", status=400)
-        if payload.get("course") is True:
+        course = payload.get("course")
+        if course is True:
             try:
                 names = list(store.load_course().actions)
             except ActionStoreError as error:
                 raise _error(error.code, str(error), status=404) from error
             # 整套播放时每段用同名语音；显式指定的 audio 只对单动作有意义。
+            explicit = False
+            kind = "course"
+        elif isinstance(course, str) and course:
+            try:
+                names = list(courses.resolve_actions(course))
+            except CourseStoreError as error:
+                raise _error(error.code, str(error), status=404) from error
             explicit = False
             kind = "course"
         else:

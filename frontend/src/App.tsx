@@ -2,6 +2,8 @@ import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 
 import { readError } from "./api";
 import { ActionWorkbench } from "./ActionWorkbench";
+import { CourseDetail } from "./CourseDetail";
+import { CourseList } from "./CourseList";
 import { ExecutionRecords } from "./ExecutionRecords";
 import { FsmPanel, fsmModeLabel, type FsmModeInfo, type FsmState } from "./FsmPanel";
 import { JointPanel, type JointRow } from "./JointPanel";
@@ -124,7 +126,7 @@ function validChannels(value: number[] | null | undefined): number[] {
   return value.filter((item) => item !== 0);
 }
 
-type View = "console" | "records";
+type View = "console" | "records" | "courses";
 type SourceState = TelemetrySnapshot["sources"][string]["state"];
 
 interface TelemetryBadgesProps {
@@ -199,6 +201,7 @@ export function App() {
   const [fsmBusy, setFsmBusy] = useState(false);
   const [fsmMessage, setFsmMessage] = useState("");
   const [view, setView] = useState<View>("console");
+  const [courseId, setCourseId] = useState<string | null>(null);
 
   useEffect(() => {
     let socket: WebSocket | null = null;
@@ -399,6 +402,18 @@ export function App() {
             <span className="nav-pill">TR</span>
             <span>执行轨迹记录</span>
           </button>
+          <button
+            type="button"
+            className={`nav-item${view === "courses" ? " active" : ""}`}
+            aria-current={view === "courses" ? "page" : undefined}
+            onClick={() => {
+              setCourseId(null);
+              setView("courses");
+            }}
+          >
+            <span className="nav-pill">CL</span>
+            <span>课程管理</span>
+          </button>
         </nav>
 
         <div className="side-note">
@@ -455,6 +470,15 @@ export function App() {
 
         {view === "records" ? (
           <ExecutionRecords />
+        ) : view === "courses" ? (
+          courseId ? (
+            <CourseDetail
+              courseId={courseId}
+              onBack={() => setCourseId(null)}
+            />
+          ) : (
+            <CourseList onOpen={(id) => setCourseId(id)} />
+          )
         ) : (
           <>
             <section className="status-strip" aria-label="连接状态">
