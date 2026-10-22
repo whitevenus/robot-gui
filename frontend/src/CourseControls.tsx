@@ -7,6 +7,15 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "re
 
 import { readError } from "./api";
 
+/** 只播讲解语音的会话（机器人不动）。 */
+export interface NarrationState {
+  phase: "idle" | "playing" | "paused";
+  current: string;
+  index: number;
+  total: number;
+  remaining: string[];
+}
+
 export interface ControlState {
   phase: string;
   message: string;
@@ -19,6 +28,7 @@ export interface ControlState {
   default_speed: number;
   current_speed: number;
   resume_actions: string[];
+  narration?: NarrationState;
 }
 
 /** 回放速度档位：只允许慢放和原速，不提供快放。 */
@@ -74,19 +84,23 @@ export function useControlSession(): ControlSession {
   }, [refresh]);
 
   /** 调一个控制接口；返回空串表示成功，否则是给用户看的错误。 */
-  const send = useCallback(async (path: string): Promise<string> => {
-    setBusy(true);
-    try {
-      const response = await fetch(path, { method: "POST" });
-      if (!response.ok) return await readError(response);
-      setState((await response.json()) as ControlState);
-      return "";
-    } catch (cause) {
-      return String(cause);
-    } finally {
-      setBusy(false);
-    }
-  }, []);
+  const send = useCallback(
+    async (path: string): Promise<string> => {
+      setBusy(true);
+      try {
+        const response = await fetch(path, { method: "POST" });
+        if (!response.ok) return await readError(response);
+        // 接口回的可能是语音会话的形状，页面认的是统一的控制状态，重新拉一次。
+        await refresh();
+        return "";
+      } catch (cause) {
+        return String(cause);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refresh],
+  );
 
   return { state, busy, refresh, send };
 }
@@ -246,9 +260,16 @@ interface SessionButtonsProps {
 /** 暂停 / 继续 / 停止：只对正在跑的会话有意义，其余时候保持禁用。 */
 export function SessionButtons({ session, onError }: SessionButtonsProps) {
   const { state, busy, send } = session;
-  const running = state !== null && RUNNING_PHASES.includes(state.phase);
-  const paused = state?.phase === "paused";
-  const remaining = state?.resume_actions?.length ?? 0;
+  const narration = state?.narration;
+  const narrationPlaying = narration?.phase === "playing";
+  const narrationPaused = narration?.phase === "paused";
+  // 回放会话和只播语音会话共用这一套按钮：谁在跑就归谁管。
+  const running =
+    (state !== null && RUNNING_PHASES.includes(state.phase)) || narrationPlaying;
+  const paused = state?.phase === "paused" || narrationPaused;
+  const remaining = narrationPaused
+    ? (narration?.remaining.length ?? 0)
+    : (state?.resume_actions?.length ?? 0);
 
   async function run(path: string) {
     const error = await send(path);
@@ -293,6 +314,23 @@ interface SessionStateProps {
 export function SessionState({ state }: SessionStateProps) {
   if (state === null) {
     return <span className="session-state meta">正在读取控制状态…</span>;
+  }
+  const narration = state.narration;
+  if (narration && narration.phase !== "idle") {
+    return (
+      <span className="session-state">
+        <span
+          className={`session-dot phase-${narration.phase === "paused" ? "paused" : "playing"}`}
+          aria-hidden="true"
+        />
+        <strong>{narration.phase === "paused" ? "语音已暂停" : "播讲解语音"}</strong>
+        {narration.current ? <span className="meta">· {narration.current}</span> : null}
+        <span className="meta">
+          {narration.index}/{narration.total} 段
+        </span>
+        <span className="chip teal">机器人不动</span>
+      </span>
+    );
   }
   const phase = PHASE_LABELS[state.phase] ?? state.phase;
   return (

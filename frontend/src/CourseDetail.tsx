@@ -88,10 +88,10 @@ export function CourseDetail({ courseId, onBack }: CourseDetailProps) {
         setNotice({ tone: "bad", text: await readError(response) });
         return;
       }
-      const body = await response.json();
+      await response.json();
       setNotice({
         tone: "info",
-        text: `已开始播放 ${name} 的讲解语音（约 ${body.duration_s} 秒），机器人没有动。`,
+        text: `已开始播放 ${name} 的讲解语音，机器人没有动。`,
       });
     } catch (error) {
       setNotice({ tone: "bad", text: String(error) });
@@ -156,7 +156,9 @@ export function CourseDetail({ courseId, onBack }: CourseDetailProps) {
     );
   }
 
-  const paused = session.state?.phase === "paused";
+  const narration = session.state?.narration;
+  const narrationPaused = narration?.phase === "paused";
+  const paused = session.state?.phase === "paused" || narrationPaused;
   const remaining = session.state?.resume_actions?.length ?? 0;
 
   return (
@@ -192,9 +194,18 @@ export function CourseDetail({ courseId, onBack }: CourseDetailProps) {
       </div>
       {paused ? (
         <p className="notice notice-info">
-          已暂停：机器人已动态回到接管瞬间的姿态，控制权已交还。继续播放会从当前实测姿态
-          重新规划，
-          {remaining > 0 ? `接着播 ${session.state?.resume_actions.join("、")}` : "重播这一段"}。
+          {narrationPaused ? (
+            <>
+              讲解语音已暂停（机器人一直没动）。继续播放会接着播剩下的{" "}
+              {narration?.remaining.length ?? 0} 段。
+            </>
+          ) : (
+            <>
+              已暂停：机器人已动态回到接管瞬间的姿态，控制权已交还。继续播放会从当前实测姿态
+              重新规划，
+              {remaining > 0 ? `接着播 ${session.state?.resume_actions.join("、")}` : "重播这一段"}。
+            </>
+          )}
         </p>
       ) : notice ? (
         <p className={`notice notice-${notice.tone}`}>{notice.text}</p>

@@ -130,7 +130,7 @@ export function CourseList({ onOpen }: CourseListProps) {
       const body = await response.json();
       setNotice({
         tone: "info",
-        text: `已开始播放「${course.name}」的讲解语音（${body.clips} 段，约 ${body.duration_s} 秒）。`,
+        text: `已开始播放「${course.name}」的讲解语音（${body.total} 段），机器人没有动。`,
       });
     } catch (error) {
       setNotice({ tone: "bad", text: String(error) });

@@ -9,6 +9,7 @@ interface CameraState {
   available: boolean;
   error_code: string;
   error_message: string;
+  source: string;
   frames: number;
   frame_age_s: number | null;
 }
@@ -60,6 +61,7 @@ export function DepthCameraView() {
       <div className="card-head">
         <h2>深度相机</h2>
         <div className="card-head-actions">
+          {state?.source ? <span className="meta">{state.source}</span> : null}
           <span
             className={`src-state ${
               state === null ? "state-unknown" : available ? "state-fresh" : "state-offline"

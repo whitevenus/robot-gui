@@ -252,6 +252,52 @@ describe("课程管理", () => {
     });
   });
 
+  it("只播语音时暂停和停止也可用", async () => {
+    stubFetch({
+      "/api/v1/courses": { courses: COURSES },
+      "/api/v1/control/state": {
+        ...CONTROL_STATE,
+        narration: {
+          phase: "playing",
+          current: "seg-a",
+          index: 1,
+          total: 2,
+          remaining: ["seg-b"],
+        },
+      },
+    });
+    renderWithConfirm(<CourseList onOpen={() => {}} />);
+    await screen.findByText("第一课");
+
+    // 语音会话也在跑：暂停和停止必须可用，不能是死的。
+    expect(screen.getByRole("button", { name: "暂停" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /继续播放/ })).toBeDisabled();
+    expect(screen.getByText("播讲解语音")).toBeInTheDocument();
+  });
+
+  it("语音暂停后可以接着播剩下的段", async () => {
+    stubFetch({
+      "/api/v1/courses": { courses: COURSES },
+      "/api/v1/control/state": {
+        ...CONTROL_STATE,
+        narration: {
+          phase: "paused",
+          current: "seg-a",
+          index: 1,
+          total: 2,
+          remaining: ["seg-b"],
+        },
+      },
+    });
+    renderWithConfirm(<CourseList onOpen={() => {}} />);
+    await screen.findByText("第一课");
+
+    const resume = screen.getByRole("button", { name: "继续播放剩余 1 段" });
+    expect(resume).toBeEnabled();
+    expect(screen.getByText("语音已暂停")).toBeInTheDocument();
+  });
+
   it("真机控制未开启时回放按钮保持禁用", async () => {
     stubFetch({
       "/api/v1/courses": { courses: COURSES },
