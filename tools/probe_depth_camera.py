@@ -74,7 +74,15 @@ def probe_video_hub() -> None:
 
 
 def probe_video_devices() -> None:
-    """V4L2 设备：相机有没有被当成普通 USB 摄像头接上。"""
+    """V4L2 设备：相机有没有被当成普通 USB 摄像头接上。
+
+    深度相机在 V4L2 下会露出**多个输出节点**（彩色流、红外流、深度流），
+    所以要看的不只是"能不能读到帧"，还有**读到的是不是彩色的**：
+    1 通道=灰度（红外/深度），2 通道=YUYV（有色），3 通道=BGR。
+
+    **必须用 CAP_V4L2 打开**：OpenCV 默认的 FFmpeg 后端解不了 yuyv422，会当成
+    8UC1（灰度）——那样测出来的通道数是假的（2026-10-22 实测踩过）。
+    """
     section("V4L2 设备（/dev/video*）")
     devices = sorted(Path("/dev").glob("video*"))
     if not devices:
@@ -91,30 +99,30 @@ def probe_video_devices() -> None:
         name = device_name(device)
         if name:
             print(f"{device}  名字：{name}")
-        capture = cv2.VideoCapture(str(device))
+        # 和后端一样走 CAP_V4L2：OpenCV 默认的 FFmpeg 后端解不了 yuyv422，
+        # 会当成 8UC1（灰度），那样看出来的"通道数"是假的。
+        capture = cv2.VideoCapture(str(device), cv2.CAP_V4L2)
         if not capture.isOpened():
             print(f"{device}：打不开。")
             continue
-        ok, frame = capture.read()
-        if ok and frame is not None:
-            OUT_DIR.mkdir(parents=True, exist_ok=True)
-            path = OUT_DIR / f"{device.name}.jpg"
-            cv2.imwrite(str(path), frame)
-            print(f"{device}：取到 {frame.shape[1]}×{frame.shape[0]}，已保存 {path}")
-        else:
-            print(f"{device}：打开了但读不出帧。")
-        # 再按**原始格式**读一帧：通道数才说明这是不是彩色流。
         capture.set(cv2.CAP_PROP_CONVERT_RGB, 0)
         ok, raw = capture.read()
+        if not ok or raw is None:
+            capture.release()
+            print(f"{device}：打开了但读不出帧。")
+            continue
+        channels = 1 if raw.ndim == 2 else int(raw.shape[2])
+        kind = {1: "灰度（红外或深度流）", 2: "YUYV（有色）", 3: "BGR（有色）"}.get(
+            channels, "未知"
+        )
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        path = OUT_DIR / f"{device.name}.jpg"
+        converted = cv2.cvtColor(raw, cv2.COLOR_YUV2BGR_YUY2) if channels == 2 else raw
+        cv2.imwrite(str(path), converted)
+        print(
+            f"{device}：{raw.shape[1]}×{raw.shape[0]}，{channels} 通道 → {kind}，已保存 {path}"
+        )
         capture.release()
-        if ok and raw is not None:
-            channels = 1 if raw.ndim == 2 else int(raw.shape[2])
-            kind = {1: "灰度（红外或深度流）", 2: "YUYV（有色）", 3: "BGR（有色）"}.get(
-                channels, "未知"
-            )
-            print(
-                f"    原始格式 {raw.shape[1]}×{raw.shape[0]}，{channels} 通道 → {kind}"
-            )
 
 
 def device_name(device: Path) -> str:

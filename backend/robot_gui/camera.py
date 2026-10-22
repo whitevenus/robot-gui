@@ -60,14 +60,20 @@ class V4l2Grabber:
 
     2026-10-22 真机实测（`tools/probe_depth_camera.py`）：**videohub RPC 不通**
     （返回 3102），`pyrealsense2` / `pyorbbec` 都没装，能用的是 V4L2。
+    相机是 **Intel RealSense D435**，彩色流在 V4L2 下是 **YUYV422**。
 
-    **深度相机在 V4L2 下会露出好几个输出节点**：彩色流、红外流、深度流。
-    红外和深度是 1 通道的灰度画面——抓错节点的话，页面上就是一张黑白照片
-    （2026-10-22 实测：先抓到了灰度的那路）。
+    **第一版抓到的是灰度画面，根因不是挑错了节点，而是解码方式**：OpenCV 默认的
+    FFmpeg 后端解不了 yuyv422，会把它当成 8UC1（单通道灰度）。所以要拿到彩色
+    必须三件事一起做：
 
-    所以挑设备时**优先选有颜色的**：关掉 OpenCV 的自动转色后，通道数才说明
-    这条流本身是不是彩色的（1=灰度，2=YUYV 有色，3=BGR 有色）。彩色流里再挑
-    分辨率最高的。要指定设备就设 `ROBOT_GUI_DEPTH_CAMERA_DEVICE`。
+    1. 用 `CAP_V4L2` 打开（别用默认后端）；
+    2. `CAP_PROP_CONVERT_RGB=0` 拿**原始**两通道 YUYV 缓冲（开着转色的话
+       FFmpeg 那一路已经把它压成灰度了）；
+    3. 自己 `cvtColor(..., COLOR_YUV2BGR_YUY2)` 转成 BGR 再编码 JPEG。
+
+    挑设备按**通道数**判断有没有颜色（1=灰度，2=YUYV 有色，3=BGR 有色）：
+    优先选有颜色的，其次分辨率最高。这台机器上选出来的是 `/dev/video4`
+    （640×480，YUYV422），就是头部相机的彩色流。
     """
 
     def __init__(self, device: str) -> None:
