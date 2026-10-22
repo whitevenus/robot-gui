@@ -143,7 +143,7 @@ class FakeSession:
 
 
 def fake_trajectory():
-    from g1_action_studio.motion import Action, action_curve
+    from g1_action_studio.motion import action_curve
 
     action = fake_action()
     return action_curve(action, np.zeros(17), 1.0)
