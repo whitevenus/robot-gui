@@ -21,7 +21,8 @@ from robot_gui.main import RuntimeSettings, create_app
 from test_real_telemetry import TelemetryTestAdapter
 
 SCHEMA_VERSION = "courseware-v3"
-PACKAGE_FORMAT = "robocourse-gateway-package-v1"
+PACKAGE_FORMAT = "robocourse-course-package-v1"
+LEGACY_PACKAGE_FORMAT = "robocourse-gateway-package-v1"
 PCM_TYPE = "audio/L16;rate=16000;channels=1"
 JSON_TYPE = "application/json"
 COURSE_ID = "11111111-1111-4111-8111-111111111111"
@@ -40,6 +41,7 @@ def build_package(
     audio_content_type: str = PCM_TYPE,
     corrupt_asset_digest: bool = False,
     motion_by_index: dict[int, dict] | None = None,
+    package_format: str = PACKAGE_FORMAT,
 ) -> Path:
     """造一个 courseware-v3 课程包，返回 zip 路径。"""
     files: list[dict] = []
@@ -123,7 +125,7 @@ def build_package(
     }
     program_bytes = json.dumps(program).encode()
     manifest = {
-        "format": PACKAGE_FORMAT,
+        "format": package_format,
         "course_id": course_id,
         "target_profile": "g1",
         "program_sha256": hashlib.sha256(program_bytes).hexdigest(),
@@ -242,6 +244,29 @@ def test_import_rolls_back_when_a_later_segment_conflicts(tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------- 坏包
+
+
+def test_import_accepts_legacy_package_format(tmp_path: Path) -> None:
+    """平台改格式名之前产出的包照样能导：格式名只是标识，包内容没变。"""
+    package = build_package(tmp_path, package_format=LEGACY_PACKAGE_FORMAT)
+    with build_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/courses/import",
+            files={"file": ("courseware.zip", package.read_bytes(), "application/zip")},
+        )
+    assert response.status_code == 201, response.text
+    assert response.json()["course"]["id"] == COURSE_ID
+
+
+def test_import_rejects_unknown_package_format(tmp_path: Path) -> None:
+    package = build_package(tmp_path, package_format="robocourse-unknown-package-v9")
+    with build_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/courses/import",
+            files={"file": ("courseware.zip", package.read_bytes(), "application/zip")},
+        )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "package_format_unsupported"
 
 
 def test_import_rejects_wrong_schema_version(tmp_path: Path) -> None:

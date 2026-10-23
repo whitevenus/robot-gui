@@ -33,7 +33,11 @@ from .actions import ActionStore, ActionStoreError
 from .courses import CourseRecord, CourseSegment, CourseStore
 
 SCHEMA_VERSION = "courseware-v3"
-PACKAGE_FORMAT = "robocourse-gateway-package-v1"
+PACKAGE_FORMAT = "robocourse-course-package-v1"
+# 旧名：平台把包格式的 format 标识从 gateway 改成中性名之前产出的包。
+# 格式名只是标识，包内容没变，所以旧名照样要认。
+LEGACY_PACKAGE_FORMAT = "robocourse-gateway-package-v1"
+ACCEPTED_PACKAGE_FORMATS = {PACKAGE_FORMAT, LEGACY_PACKAGE_FORMAT}
 PCM_TYPE = "audio/L16;rate=16000;channels=1"
 JSON_TYPE = "application/json"
 MAX_PACKAGE_BYTES = 512 << 20
@@ -153,10 +157,11 @@ def _validate_manifest(manifest: dict[str, Any], program: dict[str, Any]) -> Non
             "package_schema_unsupported",
             f"课程包版本是 {program.get('schema_version')!r}，只接受 {SCHEMA_VERSION}。",
         )
-    if manifest.get("format") != PACKAGE_FORMAT:
+    if manifest.get("format") not in ACCEPTED_PACKAGE_FORMATS:
         raise CourseImportError(
             "package_format_unsupported",
-            f"课程包格式是 {manifest.get('format')!r}，只接受 {PACKAGE_FORMAT}。",
+            f"课程包格式是 {manifest.get('format')!r}，只接受 {PACKAGE_FORMAT}"
+            f"（兼容旧名 {LEGACY_PACKAGE_FORMAT}）。",
         )
     if (
         not isinstance(program.get("target_profile"), str)
